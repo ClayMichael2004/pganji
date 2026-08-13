@@ -49,7 +49,7 @@ func TransferTx(ctx context.Context, pool *pgxpool.Pool, params TransferParams)e
 	}
 
 	lockQuery:= `SELECT id FROM accounts WHERE id IN ($1, $2) FOR UPDATE;`
-	rows, err:= tx.Query(ctx, lockQuery, firstId, secondID)
+	rows, err:= tx.Query(ctx, lockQuery, firstID, secondID)
 	if err!=nil{
 		return fmt.Errorf("failed to aqcuire row locks: %w", err)
 	}
