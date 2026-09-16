@@ -6,7 +6,7 @@ import (
 )
 
 //this function writes a standardized JSON response
-func JSONResponse (w httpResponseWriter, status int, data any){
+func JSONResponse (w http.ResponseWriter, status int, data any){
 	w.header().Set("Content-Type", "application/json")
 	w.Writeheader(status)
 	if data !=nil{
@@ -15,6 +15,6 @@ func JSONResponse (w httpResponseWriter, status int, data any){
 }
 
 //this other function writes a standardized error message(json)
-func ErrorResponse(w httpResponseWriter, status int, data any){
+func ErrorResponse(w http.ResponseWriter, status int, data any){
 	JSONResponse(w, status, map[string]string{"error": message})
 }
