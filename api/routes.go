@@ -23,15 +23,25 @@ func (s *Server) Routes() http.Handler{
 	})
 
 	//api v1 subrouter
-	r.Route("/api/v1", func(r chi.Router){
-		// Accounts endpoints (read-only)
-		r.Get("/account/balance", s.HandleGetBalance)
-		r.Get("/accounts/balance", s.HandleGetBalance)
+	r.Route("/api/v1", func(r chi.Router) {
+		// Public Auth Endpoints
+		r.Post("/auth/register", s.HandleRegister)
+		r.Post("/auth/login", s.HandleLogin)
 
-		// Transfers endpoint wrapped with Idempotency Middleware
-		r.Group(func(sub chi.Router) {
-			sub.Use(IdempotencyMiddleware(s.Pool))
-			sub.Post("/transfers", s.HandleTransfer)
+		// Protected Financial Endpoints
+		r.Group(func(protected chi.Router) {
+			protected.Use(AuthMiddleware)
+
+			// Statement / History Pagination
+			protected.Get("/accounts/statement", s.HandleGetAccountStatement)
+			protected.Get("/accounts/balance", s.HandleGetBalance)
+			protected.Get("/account/balance", s.HandleGetBalance)
+
+			// Idempotent Money Movement
+			protected.Group(func(idemp chi.Router) {
+				idemp.Use(IdempotencyMiddleware(s.Pool))
+				idemp.Post("/transfers", s.HandleTransfer)
+			})
 		})
 	})
 
