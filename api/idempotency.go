@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -20,15 +22,17 @@ type responseRecorder struct {
 
 func (r *responseRecorder) WriteHeader(code int) {
 	r.statusCode = code
-	r.ResponseWriter.WriteHeader(code)
 }
 
 func (r *responseRecorder) Write(b []byte) (int, error) {
 	if r.statusCode == 0 {
 		r.statusCode = http.StatusOK
 	}
-	r.body.Write(b)
-	return r.ResponseWriter.Write(b)
+	return r.body.Write(b)
+}
+
+func (r *responseRecorder) Header() http.Header {
+	return r.ResponseWriter.Header()
 }
 
 func IdempotencyMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
@@ -45,7 +49,6 @@ func IdempotencyMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Read & duplicate request body
 			bodyBytes, err := io.ReadAll(r.Body)
 			if err != nil {
 				JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "unable to read body"})
@@ -55,10 +58,9 @@ func IdempotencyMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 
 			hash := sha256.Sum256(bodyBytes)
 			reqHash := hex.EncodeToString(hash[:])
-
 			ctx := r.Context()
 
-			// Check for existing key
+			// 1. Check existing record
 			var (
 				cachedCode  sql.NullInt32
 				cachedBody  []byte
@@ -73,7 +75,7 @@ func IdempotencyMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			if err == nil {
 				if storedHash != reqHash {
 					JSONResponse(w, http.StatusUnprocessableEntity, map[string]string{
-						"error": "idempotency key reused with mismatched payload",
+						"error": "idempotency key reused with different request payload",
 					})
 					return
 				}
@@ -92,7 +94,7 @@ func IdempotencyMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 				}
 			}
 
-			// Insert pending execution entry
+			// 2. Lock row
 			lockQuery := `
 				INSERT INTO idempotency_keys (key, request_path, request_hash, locked_until)
 				VALUES ($1, $2, $3, $4)
@@ -103,30 +105,46 @@ func IdempotencyMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 			_, err = pool.Exec(ctx, lockQuery, key, r.URL.Path, reqHash, time.Now().Add(30*time.Second))
 			if err != nil {
 				JSONResponse(w, http.StatusConflict, map[string]string{
-					"error": "concurrent request detected for idempotency key",
+					"error": "concurrent request detected for this idempotency key",
 				})
 				return
 			}
 
-			// Wrap writer to record the downstream response
-			recorder := &responseRecorder{
+			// 3. Intercept execution
+			rec := &responseRecorder{
 				ResponseWriter: w,
 				statusCode:     0,
 				body:           &bytes.Buffer{},
 			}
-			next.ServeHTTP(recorder, r)
+			next.ServeHTTP(rec, r)
 
-			if recorder.statusCode == 0 {
-				recorder.statusCode = http.StatusOK
+			if rec.statusCode == 0 {
+				rec.statusCode = http.StatusOK
 			}
 
-			// Save final execution response
+			// 4. Flush captured buffer to actual client socket
+			for k, v := range rec.Header() {
+				w.Header()[k] = v
+			}
+			w.Header().Set("X-Cache-Lookup", "MISS")
+			w.WriteHeader(rec.statusCode)
+			w.Write(rec.body.Bytes())
+
+			// 5. Save cached response to database
+			var rawJSON any = nil
+			if json.Valid(rec.body.Bytes()) {
+				rawJSON = rec.body.String()
+			}
+
 			updateQuery := `
 				UPDATE idempotency_keys 
-				SET response_code = $1, response_body = $2 
+				SET response_code = $1, response_body = $2::jsonb 
 				WHERE key = $3;
 			`
-			_, _ = pool.Exec(ctx, updateQuery, recorder.statusCode, recorder.body.Bytes(), key)
+			_, updateErr := pool.Exec(ctx, updateQuery, rec.statusCode, rawJSON, key)
+			if updateErr != nil {
+				slog.Error("failed to persist idempotency response", "err", updateErr, "key", key)
+			}
 		})
 	}
 }
