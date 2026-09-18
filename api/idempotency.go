@@ -3,8 +3,8 @@ package api
 import (
 	"bytes"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"io"
 	"net/http"
 	"time"
@@ -24,6 +24,9 @@ func (r *responseRecorder) WriteHeader(code int) {
 }
 
 func (r *responseRecorder) Write(b []byte) (int, error) {
+	if r.statusCode == 0 {
+		r.statusCode = http.StatusOK
+	}
 	r.body.Write(b)
 	return r.ResponseWriter.Write(b)
 }
@@ -42,7 +45,7 @@ func IdempotencyMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 				return
 			}
 
-			// 1. Read & hash request body
+			// Read & duplicate request body
 			bodyBytes, err := io.ReadAll(r.Body)
 			if err != nil {
 				JSONResponse(w, http.StatusBadRequest, map[string]string{"error": "unable to read body"})
@@ -55,11 +58,11 @@ func IdempotencyMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 
 			ctx := r.Context()
 
-			// 2. Check if key already completed or is in-flight
+			// Check for existing key
 			var (
-				cachedCode int
-				cachedBody []byte
-				storedHash string
+				cachedCode  sql.NullInt32
+				cachedBody  []byte
+				storedHash  string
 				lockedUntil time.Time
 			)
 
@@ -74,10 +77,10 @@ func IdempotencyMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 					})
 					return
 				}
-				if cachedCode != 0 {
+				if cachedCode.Valid && cachedCode.Int32 > 0 {
 					w.Header().Set("Content-Type", "application/json")
 					w.Header().Set("X-Cache-Lookup", "HIT")
-					w.WriteHeader(cachedCode)
+					w.WriteHeader(int(cachedCode.Int32))
 					w.Write(cachedBody)
 					return
 				}
@@ -89,7 +92,7 @@ func IdempotencyMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 				}
 			}
 
-			// 3. Acquire lock record
+			// Insert pending execution entry
 			lockQuery := `
 				INSERT INTO idempotency_keys (key, request_path, request_hash, locked_until)
 				VALUES ($1, $2, $3, $4)
@@ -105,23 +108,25 @@ func IdempotencyMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 				return
 			}
 
-			// 4. Execute downstream handler & capture output
+			// Wrap writer to record the downstream response
 			recorder := &responseRecorder{
 				ResponseWriter: w,
-				statusCode:     http.StatusOK,
+				statusCode:     0,
 				body:           &bytes.Buffer{},
 			}
 			next.ServeHTTP(recorder, r)
 
-			// 5. Store completed response
-			if json.Valid(recorder.body.Bytes()) {
-				updateQuery := `
-					UPDATE idempotency_keys 
-					SET response_code = $1, response_body = $2 
-					WHERE key = $3;
-				`
-				_, _ = pool.Exec(ctx, updateQuery, recorder.statusCode, recorder.body.Bytes(), key)
+			if recorder.statusCode == 0 {
+				recorder.statusCode = http.StatusOK
 			}
+
+			// Save final execution response
+			updateQuery := `
+				UPDATE idempotency_keys 
+				SET response_code = $1, response_body = $2 
+				WHERE key = $3;
+			`
+			_, _ = pool.Exec(ctx, updateQuery, recorder.statusCode, recorder.body.Bytes(), key)
 		})
 	}
 }
