@@ -7,3 +7,9 @@
 2026-08-12 23:07:40.471 EAT [97173] LOG:  checkpoint starting: time
 2026-08-12 23:09:20.847 EAT [97173] LOG:  checkpoint complete: wrote 996 buffers (6.1%), wrote 3 SLRU buffers; 1 WAL file(s) added, 0 removed, 0 recycled; write=100.166 s, sync=0.098 s, total=100.377 s; sync files=330, longest=0.058 s, average=0.001 s; distance=4696 kB, estimate=4696 kB; lsn=0/1C5A2C0, redo lsn=0/1BFE380
 2026-08-12 23:17:06.268 EAT [112995] LOG:  could not receive data from client: Connection reset by peer
+2026-09-18 09:26:38.348 EAT [445890] LOG:  starting PostgreSQL 18.4 on x86_64-conda-linux-gnu, compiled by x86_64-conda-linux-gnu-cc (GCC) 14.3.0, 64-bit
+2026-09-18 09:26:38.349 EAT [445890] LOG:  could not bind IPv4 address "127.0.0.1": Address already in use
+2026-09-18 09:26:38.349 EAT [445890] HINT:  Is another postmaster already running on port 5432? If not, wait a few seconds and retry.
+2026-09-18 09:26:38.349 EAT [445890] WARNING:  could not create listen socket for "localhost"
+2026-09-18 09:26:38.349 EAT [445890] FATAL:  could not create any TCP/IP sockets
+2026-09-18 09:26:38.352 EAT [445890] LOG:  database system is shut down
