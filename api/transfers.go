@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 	"pganji/db"
@@ -23,7 +22,7 @@ type CreateTransferRequest struct{
 
 func (s *Server) HandleTransfer(w http.ResponseWriter, r *http.Request){
 	var req CreateTransferRequest
-	if err:=json.NewEncoder(r.Body).Decode(&req); err!=nil{
+	if err:=json.NewDecoder(r.Body).Decode(&req); err!=nil{
 		ErrorResponse(w, http.StatusBadRequest, "invalid JSON payload")
 		return
 	}
@@ -77,7 +76,7 @@ func (s *Server) HandleTransfer(w http.ResponseWriter, r *http.Request){
 	//return 201 created success
 	JSONResponse(w, http.StatusCreated, map[string]any{
 		"status": "COMPLETED",
-		"message": "Transfer executed successfuly"
+		"message": "Transfer executed successfuly",
 		"reference": req.Reference,
 		"amount": req.Amount,
 	})
@@ -85,8 +84,8 @@ func (s *Server) HandleTransfer(w http.ResponseWriter, r *http.Request){
 
 func(s *Server) HandleGetBalance(w http.ResponseWriter, r *http.Request){
 	//query param /api/v1/accounts/balance?account_id=<UUID>
-	accountID:= r.URl.Query().get("account_id")
-	if strings.Trimspace(accountID)==""{
+	accountID:= r.URL.Query().Get("account_id")
+	if strings.TrimSpace(accountID)==""{
 		ErrorResponse(w, http.StatusBadRequest, "account_id query parameter is required")
 		return
 	}
@@ -106,6 +105,6 @@ func(s *Server) HandleGetBalance(w http.ResponseWriter, r *http.Request){
 	JSONResponse(w, http.StatusOK, map[string]any{
 		"account_id": accountID,
 		"balance": balance,
-		"formatted": float64(balance)/100.0
+		"formatted": float64(balance)/100.0,
 	})
 }
