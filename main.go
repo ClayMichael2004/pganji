@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"time"
@@ -10,14 +11,13 @@ import (
 	"log/slog"//slog allows printing in structured format(JSON)
 	"net/http"
 	"os/signal"
-	"time"
 	"syscall"
 )
 
 func main(){
 	//use structured JSON logging
 	logger:= slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	slog.Setdefault(logger)
+	slog.SetDefault(logger)
 	connStr:= os.Getenv("DATABASE_URL")
 	if connStr==""{
 		//fallback default for local dev
