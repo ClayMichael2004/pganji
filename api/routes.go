@@ -24,10 +24,15 @@ func (s *Server) Routes() http.Handler{
 
 	//api v1 subrouter
 	r.Route("/api/v1", func(r chi.Router){
-		r.With(IdempotencyMiddleware(s.Pool)).Post("/transfers", s.HandleTransfer)
-		r.Post("/transfers", s.HandleTransfer)
-		r.Get("/accounts/balance", s.HandleGetBalance)
+		// Accounts endpoints (read-only)
 		r.Get("/account/balance", s.HandleGetBalance)
+		r.Get("/accounts/balance", s.HandleGetBalance)
+
+		// Transfers endpoint wrapped with Idempotency Middleware
+		r.Group(func(sub chi.Router) {
+			sub.Use(IdempotencyMiddleware(s.Pool))
+			sub.Post("/transfers", s.HandleTransfer)
+		})
 	})
 
 	return r
