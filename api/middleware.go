@@ -44,8 +44,21 @@ type client struct{
 type IPRateLimiter struct{
 	mu sync.Mutex
 	clients map[string]*client
-	rate rate.Limiter
+	rate rate.Limit
 	burst int
+}
+
+func (i *IPRateLimiter) cleanupLoop() {
+	for {
+		time.Sleep(5 * time.Minute)
+		i.mu.Lock()
+		for ip, c := range i.clients {
+			if time.Since(c.lastSeen) > 10*time.Minute {
+				delete(i.clients, ip)
+			}
+		}
+		i.mu.Unlock()
+	}
 }
 
 //function below creates a new rate limiter 
@@ -53,11 +66,11 @@ func NewIPRateLimiter(r rate.Limit, b int) *IPRateLimiter{
 	limiter := &IPRateLimiter{
 		clients: make(map[string]*client),
 		rate: r,
-		burst; b,
+		burst: b,
 	}
 
 	//clean up inactive clients every 5 minutes in the background
-	go limiter.cleanuploop()
+	go limiter.cleanupLoop()
 	return limiter
 }
 
