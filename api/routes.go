@@ -25,7 +25,7 @@ func (s *Server) Routes() http.Handler{
 	//api v1 subrouter
 	r.Route("/api/v1", func(r chi.Router){
 		r.Post("/transfers", s.HandleTransfer)
-		r.Get("/account/balance", s.HandleGetBalance)
+		r.Get("/accounts/balance", s.HandleGetBalance)
 	})
 
 	return r
