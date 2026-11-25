@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"pganji/api"
 	"pganji/db"
+	"pganji/outbox"
 )
 
 //go:embed migrations/*.sql
@@ -64,7 +65,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3. Initialize HTTP Server
+	// 3. Start Transactional Outbox Background Worker
+	workerCtx, workerCancel := context.WithCancel(context.Background())
+	defer workerCancel()
+
+	outboxWorker := outbox.NewWorker(pool, &outbox.LogPublisher{}, 500*time.Millisecond)
+	go outboxWorker.Start(workerCtx)
+
+	// 4. Initialize HTTP Server
 	srv := &api.Server{Pool: pool}
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%s", port),
@@ -88,6 +96,8 @@ func main() {
 	<-quit
 
 	slog.Info("initiating graceful shutdown...")
+	workerCancel()
+
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 

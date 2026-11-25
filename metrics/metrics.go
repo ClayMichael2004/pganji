@@ -1,4 +1,3 @@
-//this file  creates the promotheus telementry
 package metrics
 
 import (
@@ -33,6 +32,22 @@ var (
 			Name: "pganji_rate_limit_throttled_total",
 			Help: "Total client requests rejected with HTTP 429",
 		},
+	)
+
+	OutboxEventsPublishedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "pganji_outbox_events_published_total",
+			Help: "Total number of outbox events successfully dispatched",
+		},
+		[]string{"event_type"},
+	)
+
+	OutboxEventsFailedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "pganji_outbox_events_failed_total",
+			Help: "Total number of outbox event dispatch attempts that failed",
+		},
+		[]string{"event_type"},
 	)
 )
 

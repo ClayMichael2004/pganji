@@ -6,6 +6,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"pganji/outbox"
 )
 
 // TransferParams holds the input required to execute an atomic money transfer.
@@ -97,7 +98,21 @@ func TransferTx(ctx context.Context, pool *pgxpool.Pool, params TransferParams) 
 		return fmt.Errorf("failed to insert receiver entry: %w", err)
 	}
 
-	// 6. Commit permanently
+	// 6. Record Outbox Event inside the exact same ACID transaction
+	eventPayload := map[string]any{
+		"transaction_id":  txID,
+		"reference":       params.Reference,
+		"from_account_id": params.FromAccountID,
+		"to_account_id":   params.ToAccountID,
+		"amount":          params.Amount,
+		"description":     params.Description,
+		"status":          "COMPLETED",
+	}
+	if err := outbox.InsertEvent(ctx, tx, "TRANSACTION", txID, "transfer.completed", eventPayload); err != nil {
+		return fmt.Errorf("failed to record outbox event: %w", err)
+	}
+
+	// 7. Commit permanently
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
