@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS outbox_events CASCADE;
+DROP TYPE IF EXISTS outbox_status CASCADE;
