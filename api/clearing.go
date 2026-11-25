@@ -104,7 +104,7 @@ func (s *Server) HandleMpesaDepositWebhook(w http.ResponseWriter, r *http.Reques
 
 // HandleWithdraw initiates an authenticated B2C payout from a user's owned wallet account.
 func (s *Server) HandleWithdraw(w http.ResponseWriter, r *http.Request) {
-	userID, ok := r.Context().Value(UserIDContextKey).(string)
+	userID, ok := r.Context().Value(UserContextKey).(string)
 	if !ok || userID == "" {
 		ErrorResponse(w, http.StatusUnauthorized, "unauthorized")
 		return
