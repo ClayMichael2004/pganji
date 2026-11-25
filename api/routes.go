@@ -33,7 +33,7 @@ func (s *Server) Routes() http.Handler{
 		// Public Auth Endpoints
 		r.Post("/auth/register", s.HandleRegister)
 		r.Post("/auth/login", s.HandleLogin)
-
+		r.Post("/webhooks/mpesa/c2b", s.HandleMpesaDepositWebhook)
 		// Protected Financial Endpoints
 		r.Group(func(protected chi.Router) {
 			protected.Use(AuthMiddleware)
@@ -47,6 +47,7 @@ func (s *Server) Routes() http.Handler{
 			protected.Group(func(idemp chi.Router) {
 				idemp.Use(IdempotencyMiddleware(s.Pool))
 				idemp.Post("/transfers", s.HandleTransfer)
+				idemp.Post("/clearing/withdraw", s.HandleWithdraw)
 			})
 		})
 	})
