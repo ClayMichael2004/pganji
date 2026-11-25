@@ -65,11 +65,26 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 3. Start Transactional Outbox Background Worker
 	workerCtx, workerCancel := context.WithCancel(context.Background())
 	defer workerCancel()
 
-	outboxWorker := outbox.NewWorker(pool, &outbox.LogPublisher{}, 500*time.Millisecond)
+	var publisher outbox.Publisher
+	webhookURL := os.Getenv("WEBHOOK_URL")
+	webhookSecret := os.Getenv("WEBHOOK_SECRET")
+
+	if webhookURL != "" {
+		if webhookSecret == "" {
+			slog.Error("WEBHOOK_SECRET must be set when WEBHOOK_URL is configured")
+			os.Exit(1)
+		}
+		publisher = outbox.NewWebhookPublisher(webhookURL, webhookSecret)
+		slog.Info("configured HMAC-SHA256 webhook outbox publisher", "target_url", webhookURL)
+	} else {
+		publisher = &outbox.LogPublisher{}
+		slog.Info("WEBHOOK_URL not set; defaulting to LogPublisher")
+	}
+
+	outboxWorker := outbox.NewWorker(pool, publisher, 500*time.Millisecond)
 	go outboxWorker.Start(workerCtx)
 
 	// 4. Initialize HTTP Server
