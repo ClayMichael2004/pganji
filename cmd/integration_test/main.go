@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -15,20 +16,21 @@ type AuthResp struct {
 	Email  string `json:"email"`
 }
 
-type StatementResp struct {
-	AccountID  string `json:"account_id"`
-	Entries    []any  `json:"entries"`
-	NextCursor string `json:"next_cursor"`
-	HasMore    bool   `json:"has_more"`
-}
-
 func main() {
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 5 * time.Second}
 	baseURL := "http://localhost:8080/api/v1"
 
 	fmt.Println("=== RUNNING AUTOMATED E2E INTEGRATION AUDIT ===")
 
-	// 1. Dynamic User Registration
+	// 1. Pre-flight Health Check
+	healthResp, err := client.Get("http://localhost:8080/health")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "FATAL: API server unreachable on http://localhost:8080: %v\n", err)
+		os.Exit(1)
+	}
+	healthResp.Body.Close()
+
+	// 2. Dynamic User Registration
 	uniqueEmail := fmt.Sprintf("audit-%d@pganji.io", time.Now().UnixNano())
 	regBody, _ := json.Marshal(map[string]string{
 		"email":     uniqueEmail,
@@ -37,43 +39,55 @@ func main() {
 	})
 
 	resp, err := client.Post(baseURL+"/auth/register", "application/json", bytes.NewBuffer(regBody))
-	if err != nil || resp.StatusCode != http.StatusCreated {
-		panic(fmt.Sprintf("Registration failed: status %d, err %v", resp.StatusCode, err))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Registration error: %v\n", err)
+		os.Exit(1)
 	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "Registration failed (%d): %s\n", resp.StatusCode, string(body))
+		os.Exit(1)
+	}
+
 	var authData AuthResp
-	_ = json.NewDecoder(resp.Body).Decode(&authData)
-	resp.Body.Close()
+	if err := json.NewDecoder(resp.Body).Decode(&authData); err != nil {
+		fmt.Fprintf(os.Stderr, "JSON decode error: %v\n", err)
+		os.Exit(1)
+	}
 	fmt.Printf("[PASS] User Registration & Token Issuance (%s)\n", authData.UserID)
 
-	// 2. Unauthenticated Guard Verification
+	// 3. Unauthenticated Guard Verification (Expect 401)
 	dummyAcc := "dddddddd-dddd-dddd-dddd-dddddddddddd"
-	unauthResp, _ := client.Get(fmt.Sprintf("%s/accounts/statement?account_id=%s", baseURL, dummyAcc))
+	unauthResp, err := client.Get(fmt.Sprintf("%s/accounts/statement?account_id=%s", baseURL, dummyAcc))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Unauthenticated request failed: %v\n", err)
+		os.Exit(1)
+	}
 	if unauthResp.StatusCode != http.StatusUnauthorized {
-		panic(fmt.Sprintf("Security guard failed: expected 401, got %d", unauthResp.StatusCode))
+		unauthResp.Body.Close()
+		fmt.Fprintf(os.Stderr, "Expected 401 Unauthorized, got %d\n", unauthResp.StatusCode)
+		os.Exit(1)
 	}
 	unauthResp.Body.Close()
 	fmt.Println("[PASS] Unauthenticated Guard Protection (401 Unauthorized)")
 
-	// 3. Authenticated Ownership Isolation (User attempts to view an account they do not own)
+	// 4. Authenticated Ownership Isolation (Expect 403)
 	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/accounts/statement?account_id=%s", baseURL, dummyAcc), nil)
 	req.Header.Set("Authorization", "Bearer "+authData.Token)
-	forbiddenResp, _ := client.Do(req)
+	forbiddenResp, err := client.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Forbidden isolation test failed: %v\n", err)
+		os.Exit(1)
+	}
 	if forbiddenResp.StatusCode != http.StatusForbidden {
-		panic(fmt.Sprintf("Ownership isolation failed: expected 403, got %d", forbiddenResp.StatusCode))
+		forbiddenResp.Body.Close()
+		fmt.Fprintf(os.Stderr, "Expected 403 Forbidden, got %d\n", forbiddenResp.StatusCode)
+		os.Exit(1)
 	}
 	forbiddenResp.Body.Close()
 	fmt.Println("[PASS] Tenant Ownership Isolation (403 Forbidden)")
 
-	// 4. Cursor Pagination Traversal
-	// Use existing seeded account with the original token
-	origToken := "Bearer " + authData.Token
-	// Test pagination query with authenticated context
-	req, _ = http.NewRequest("GET", fmt.Sprintf("%s/health", "http://localhost:8080"), nil)
-	healthResp, _ := client.Do(req)
-	body, _ := io.ReadAll(healthResp.Body)
-	healthResp.Body.Close()
-	_ = origToken
-
-	fmt.Printf("[PASS] System Health & Pipeline Active: %s\n", string(body))
 	fmt.Println("\n>>> VERDICT: ALL E2E CONTRACTS VALIDATED WITH ZERO LOOPHOLES <<<")
 }

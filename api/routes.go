@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/time/rate"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"pganji/metrics"
 )
 
 func (s *Server) Routes() http.Handler{
@@ -13,9 +15,13 @@ func (s *Server) Routes() http.Handler{
 	limiter:= NewIPRateLimiter(rate.Limit(10), 20)
 
 	//global middleware pipeline
+	r.Use(metrics.PrometheusMiddleware)
 	r.Use(Recoverer)
 	r.Use(RequestLogger)
 	r.Use(limiter.LimitMiddleware)
+
+	//promotheus scraper endpoint
+	r.Handle("/metrics", promhttp.Handler())
 
 	//health check
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request){

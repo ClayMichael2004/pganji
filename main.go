@@ -2,69 +2,97 @@ package main
 
 import (
 	"context"
-	"errors"
-	"log"
-	"os"
-	"time"
-	"pganji/db"
-	"pganji/api"
-	"log/slog"//slog allows printing in structured format(JSON)
+	"embed"
+	"fmt"
+	"io/fs"
+	"log/slog"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"pganji/api"
+	"pganji/db"
 )
 
-func main(){
-	//use structured JSON logging
-	logger:= slog.New(slog.NewJSONHandler(os.Stdout, nil))
+//go:embed migrations/*.sql
+var migrationFS embed.FS
+
+func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
-	connStr:= os.Getenv("DATABASE_URL")
-	if connStr==""{
-		//fallback default for local dev
-		connStr="postgres://localhost:5432/pganji?sslmode=disable"
+
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		slog.Error("DATABASE_URL environment variable is not configured")
+		os.Exit(1)
 	}
 
-	//create a context with a 5 second timeout for the initial connection
-	ctx, cancel:= context.WithTimeout(context.Background(), 10*time.Second)
-	// Without defer cancel(): If your database connection succeeds in 5 milliseconds, the background timer keeps running in Go's memory for the full duration (e.g., 3 seconds). Under heavy traffic, thousands of these zombie timers will pile up, causing a major memory leak.With defer cancel(): The moment your function finishes connecting and returns the pool, the context is immediately destroyed, instantly freeing up system memory.
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	// 1. Connect Database Connection Pool
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err:= db.ConnectDB(ctx, connStr)
-	if err!=nil{
-		log.Fatalf("Fatal Error: Could not connect to db; %v\n", err)
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		slog.Error("unable to initialize database connection pool", "error", err)
+		os.Exit(1)
 	}
 	defer pool.Close()
 
-	//initialize API Server
-	server:= &api.Server{Pool: pool}
-	httpServer:= &http.Server{
-		Addr: ":8080",
-		Handler: server.Routes(),
-		ReadTimeout: 5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout: 120 * time.Second,
+	if err := pool.Ping(ctx); err != nil {
+		slog.Error("database ping failed", "error", err)
+		os.Exit(1)
+	}
+	slog.Info("successfully connected to PostgreSQL pool")
+
+	// 2. Run Embedded Migrations using the active pool
+	subFS, err := fs.Sub(migrationFS, "migrations")
+	if err != nil {
+		slog.Error("failed to create migration sub filesystem", "error", err)
+		os.Exit(1)
 	}
 
-	//gracefull shutdown time
-	shutdownChan:= make(chan os.Signal, 1)
-	signal.Notify(shutdownChan, os.Interrupt, syscall.SIGTERM)
+	if err := db.RunMigrationsWithPool(subFS, pool); err != nil {
+		slog.Error("failed to run database migrations", "error", err)
+		os.Exit(1)
+	}
 
-	go func(){
-		slog.Info("Pganji api server listening on port 8080 ...")
-		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed){
+	// 3. Initialize HTTP Server
+	srv := &api.Server{Pool: pool}
+	httpServer := &http.Server{
+		Addr:         fmt.Sprintf(":%s", port),
+		Handler:      srv.Routes(),
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	go func() {
+		slog.Info("pganji api server listening", "port", port)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("HTTP server error", "error", err)
+			os.Exit(1)
 		}
 	}()
 
-	//wait for shutdown signal which in this case is control c
-	<-shutdownChan
-	slog.Info("shutting down Pganji server...")
-	shutdownCtx, shutdownCancel:= context.WithTimeout(context.Background(), 10*time.Second)
+	// Graceful Shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+
+	slog.Info("initiating graceful shutdown...")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer shutdownCancel()
 
-	if err:= httpServer.Shutdown(shutdownCtx); err != nil{
-		slog.Error("Graceful shutdown failed", "error", err)
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		slog.Error("forced shutdown triggered", "error", err)
 	}
-
-	slog.Info("pganji server stopped cleanly")
+	slog.Info("server shutdown complete")
 }
