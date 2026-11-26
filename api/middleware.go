@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 	"golang.org/x/time/rate"
@@ -88,12 +89,32 @@ func (i *IPRateLimiter) getClient(ip string) *rate.Limiter{
 	return c.limiter
 }
 
+func getClientIP(r *http.Request) string {
+	// 1. Check X-Forwarded-For header (first hop is the real client)
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		clientIP := strings.TrimSpace(parts[0])
+		if clientIP != "" {
+			return clientIP
+		}
+	}
+
+	// 2. Check X-Real-IP header
+	if xrip := strings.TrimSpace(r.Header.Get("X-Real-IP")); xrip != "" {
+		return xrip
+	}
+
+	// 3. Fallback to direct TCP connection address
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
+}
+
 func (i *IPRateLimiter) LimitMiddleware(next http.Handler) http.Handler{
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request){
-		ip, _, err:= net.SplitHostPort(r.RemoteAddr)
-		if err !=nil{
-			ip = r.RemoteAddr
-		}
+		ip := getClientIP(r)
 		limiter:= i.getClient(ip)
 		if !limiter.Allow(){
 			slog.Warn("rate limit exceeded", "ip", ip)

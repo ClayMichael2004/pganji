@@ -12,7 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"pganji/api"
 	"pganji/db"
 	"pganji/metrics"
@@ -37,11 +36,11 @@ func main() {
 		port = "8080"
 	}
 
-	// 1. Connect Database Connection Pool
+	// 1. Connect Database Connection Pool with enterprise pool parameters
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
+	pool, err := db.ConnectDB(ctx, dbURL)
 	if err != nil {
 		slog.Error("unable to initialize database connection pool", "error", err)
 		os.Exit(1)
