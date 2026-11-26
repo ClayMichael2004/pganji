@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"pganji/api"
 	"pganji/db"
+	"pganji/metrics"
 	"pganji/outbox"
 )
 
@@ -52,6 +53,9 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("successfully connected to PostgreSQL pool")
+
+	// Register Prometheus FX, Clearing, Reversal & Reconciliation Collectors
+	metrics.RegisterEnterpriseMetrics(pool)
 
 	// 2. Run Embedded Migrations using the active pool
 	subFS, err := fs.Sub(migrationFS, "migrations")
