@@ -28,15 +28,15 @@ func (s *Server) Routes() http.Handler{
 		JSONResponse(w, http.StatusOK, map[string]string{"status": "healthy"})
 	})
 
-	// Public API Documentation & OpenAPI 3.1 Specification
-	r.Get("/openapi.yaml", s.HandleOpenAPISpec)
-	r.Get("/docs", s.HandleSwaggerUI)
 
 	//api v1 subrouter
 	r.Route("/api/v1", func(r chi.Router) {
 		// Public Auth Endpoints
 		r.Post("/auth/register", s.HandleRegister)
 		r.Post("/auth/login", s.HandleLogin)
+		// Public API Documentation & OpenAPI 3.1 Specification
+		r.Get("/openapi.yaml", s.HandleOpenAPISpec)
+		r.Get("/docs", s.HandleSwaggerUI)
 		r.Post("/webhooks/mpesa/c2b", s.HandleMpesaDepositWebhook)
 
 		// External Provider Settlement Webhooks (HMAC-SHA256 authenticated)
