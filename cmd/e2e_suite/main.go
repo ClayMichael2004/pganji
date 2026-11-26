@@ -21,6 +21,8 @@ import (
 const (
 	baseURL       = "http://localhost:8080/api/v1"
 	defaultSecret = "whsec_pganji_local_signing_secret_2026"
+	fxBridgeKESID = "00000000-0000-0000-0000-000000000002"
+	fxBridgeUSDID = "00000000-0000-0000-0000-000000000003"
 )
 
 type apiClient struct {
@@ -78,6 +80,16 @@ func assert(cond bool, msg string) {
 		os.Exit(1)
 	}
 	fmt.Printf("[PASS] %s\n", msg)
+}
+
+func getPoolNetBalance(ctx context.Context, pool *pgxpool.Pool, accountID string) int64 {
+	var bal int64
+	_ = pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(CASE WHEN entry_type = 'DEBIT' THEN amount ELSE -amount END), 0)
+		FROM journal_entries
+		WHERE account_id = $1
+	`, accountID).Scan(&bal)
+	return bal
 }
 
 func main() {
@@ -187,7 +199,8 @@ func main() {
 	assert(err == nil && status == http.StatusCreated, fmt.Sprintf("Execute cross-currency KES->USD FX conversion (HTTP %d)", status))
 
 	var fxResp struct {
-		TargetAmount int64 `json:"target_amount"`
+		TransactionID string `json:"transaction_id"`
+		TargetAmount  int64  `json:"target_amount"`
 	}
 	_ = json.Unmarshal(raw, &fxResp)
 	assert(fxResp.TargetAmount == 1000, fmt.Sprintf("Exact rational FX conversion output: %d USD cents (expected 1000)", fxResp.TargetAmount))
@@ -257,10 +270,60 @@ func main() {
 		Balance int64 `json:"balance"`
 	}
 	_ = json.Unmarshal(raw, &balResp)
-	assert(status == http.StatusOK && balResp.Balance == 371000, fmt.Sprintf("Primary KES wallet restored to 371,000 cents after reversals (actual=%d)", balResp.Balance))
+	assert(status == http.StatusOK && balResp.Balance == 371000, fmt.Sprintf("Primary KES wallet restored to 371,000 cents after B2C reversal (actual=%d)", balResp.Balance))
 
 	// -------------------------------------------------------------------------
-	// 6. Database-Layer Immutability Trigger Verification
+	// 6. 4-Leg Cross-Currency FX Reversal & Bridge Unwind Verification
+	// -------------------------------------------------------------------------
+	bridgeKESPre := getPoolNetBalance(ctx, pool, fxBridgeKESID)
+	bridgeUSDPre := getPoolNetBalance(ctx, pool, fxBridgeUSDID)
+
+	status, raw, err = client.doJSON("POST", "/fx/convert", map[string]any{
+		"from_account_id": kesPrimaryID,
+		"to_account_id":   usdWalletID,
+		"source_amount":   129000,
+		"reference":       "FX-REV-TARGET-" + runTag,
+		"description":     "Second FX conversion to test 4-leg reversal",
+	}, map[string]string{"Idempotency-Key": "idem-fx2-" + runTag})
+	assert(err == nil && status == http.StatusCreated, fmt.Sprintf("Execute second KES->USD FX conversion (HTTP %d)", status))
+
+	var fx2Resp struct {
+		TransactionID string `json:"transaction_id"`
+	}
+	_ = json.Unmarshal(raw, &fx2Resp)
+
+	status, _, err = client.doJSON("POST", "/transfers/reverse", map[string]any{
+		"transaction_id": fx2Resp.TransactionID,
+		"reference":      "REV-FX-" + runTag,
+		"reason":         "E2E 4-leg FX bridge unwind test",
+	}, map[string]string{"Idempotency-Key": "idem-rev-fx-" + runTag})
+	assert(err == nil && status == http.StatusCreated, fmt.Sprintf("Reverse 4-leg KES->USD FX transaction (HTTP %d)", status))
+
+	bridgeKESPost := getPoolNetBalance(ctx, pool, fxBridgeKESID)
+	bridgeUSDPost := getPoolNetBalance(ctx, pool, fxBridgeUSDID)
+	assert(bridgeKESPre == bridgeKESPost && bridgeUSDPre == bridgeUSDPost,
+		fmt.Sprintf("FX bridge pools unwound cleanly (KES: %d->%d, USD: %d->%d)", bridgeKESPre, bridgeKESPost, bridgeUSDPre, bridgeUSDPost))
+
+	// Verify USD clawback guard: transfer remaining 1,000 USD cents out, then attempt to reverse first FX trade
+	usdSecondID := createWallet("USD")
+	status, _, _ = client.doJSON("POST", "/transfers", map[string]any{
+		"from_account_id": usdWalletID,
+		"to_account_id":   usdSecondID,
+		"amount":          1000,
+		"reference":       "TX-USD-DRAIN-" + runTag,
+		"description":     "Move USD before attempting FX reversal",
+	}, map[string]string{"Idempotency-Key": "idem-usd-drain-" + runTag})
+	assert(status == http.StatusCreated, "Transfer 1,000 USD cents to secondary USD wallet")
+
+	clawbackStatus, _, _ := client.doJSON("POST", "/transfers/reverse", map[string]any{
+		"transaction_id": fxResp.TransactionID,
+		"reference":      "REV-FX-CLAWBACK-" + runTag,
+		"reason":         "Attempt FX reversal after spending USD",
+	}, map[string]string{"Idempotency-Key": "idem-rev-fx-clawback-" + runTag})
+	assert(clawbackStatus == http.StatusUnprocessableEntity, fmt.Sprintf("Block FX reversal when USD clawback funds were spent (HTTP %d)", clawbackStatus))
+
+	// -------------------------------------------------------------------------
+	// 7. Database-Layer Immutability Trigger Verification
 	// -------------------------------------------------------------------------
 	_, updErr := pool.Exec(ctx, `UPDATE journal_entries SET amount = amount + 1 WHERE seq = 1`)
 	assert(updErr != nil && strings.Contains(updErr.Error(), "ledger immutability violation"), "PostgreSQL trigger blocked direct UPDATE on journal_entries")
@@ -269,7 +332,7 @@ func main() {
 	assert(delErr != nil && strings.Contains(delErr.Error(), "ledger immutability violation"), "PostgreSQL trigger blocked direct DELETE on journal_entries")
 
 	// -------------------------------------------------------------------------
-	// 7. Cryptographic SHA-256 Hash Chain Verification
+	// 8. Cryptographic SHA-256 Hash Chain Verification
 	// -------------------------------------------------------------------------
 	status, raw, err = client.doJSON("GET", "/audit/verify-chain", nil, nil)
 	var chainResp struct {
@@ -282,7 +345,7 @@ func main() {
 		fmt.Sprintf("SHA-256 hash chain VALID across %d entries (trial_balance_net=%d)", chainResp.TotalEntries, chainResp.TrialBalanceNet))
 
 	// -------------------------------------------------------------------------
-	// 8. Multi-Currency Treasury & Clearing Reconciliation
+	// 9. Multi-Currency Treasury & Clearing Reconciliation
 	// -------------------------------------------------------------------------
 	status, raw, err = client.doJSON("GET", "/audit/reconcile", nil, nil)
 	var recResp struct {
@@ -296,5 +359,5 @@ func main() {
 	assert(err == nil && status == http.StatusOK && recResp.OverallStatus == "RECONCILED" && recResp.ClearingReconciliation.Reconciled,
 		fmt.Sprintf("Treasury reconciliation RECONCILED (clearing_discrepancy=%d)", recResp.ClearingReconciliation.ClearingDiscrepancy))
 
-	fmt.Println("\n>>> VERDICT: ALL 8 ENTERPRISE LEDGER INVARIANTS PASSED <<<")
+	fmt.Println("\n>>> VERDICT: ALL 9 ENTERPRISE LEDGER INVARIANTS PASSED <<<")
 }
