@@ -28,6 +28,10 @@ func (s *Server) Routes() http.Handler{
 		JSONResponse(w, http.StatusOK, map[string]string{"status": "healthy"})
 	})
 
+	// Public API Documentation & OpenAPI 3.1 Specification
+	r.Get("/openapi.yaml", s.HandleOpenAPISpec)
+	r.Get("/docs", s.HandleSwaggerUI)
+
 	//api v1 subrouter
 	r.Route("/api/v1", func(r chi.Router) {
 		// Public Auth Endpoints
