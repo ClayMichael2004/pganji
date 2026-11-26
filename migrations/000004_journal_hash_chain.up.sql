@@ -1,5 +1,3 @@
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
 -- 1. Add monotonic sequence and hash chain columns
 ALTER TABLE journal_entries
     ADD COLUMN IF NOT EXISTS seq BIGSERIAL,
@@ -21,7 +19,7 @@ BEGIN
     LOOP
         v_payload := r.seq::text || '|' || v_prev || '|' || r.transaction_id::text || '|' ||
                      r.account_id::text || '|' || r.entry_type::text || '|' || r.amount::text;
-        v_hash := encode(digest(v_payload, 'sha256'), 'hex');
+        v_hash := encode(sha256(v_payload::bytea), 'hex');
 
         UPDATE journal_entries
         SET prev_hash = v_prev,
@@ -61,7 +59,7 @@ BEGIN
     NEW.prev_hash := v_prev_hash;
     v_payload := NEW.seq::text || '|' || NEW.prev_hash || '|' || NEW.transaction_id::text || '|' ||
                  NEW.account_id::text || '|' || NEW.entry_type::text || '|' || NEW.amount::text;
-    NEW.entry_hash := encode(digest(v_payload, 'sha256'), 'hex');
+    NEW.entry_hash := encode(sha256(v_payload::bytea), 'hex');
 
     RETURN NEW;
 END;
