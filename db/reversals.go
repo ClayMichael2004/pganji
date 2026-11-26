@@ -33,6 +33,12 @@ type journalLeg struct {
 	Amount    int64
 }
 
+func isInstitutionalPoolAccount(accountID string) bool {
+	return accountID == MpesaClearingAccountID ||
+		accountID == FXBridgeKESAccountID ||
+		accountID == FXBridgeUSDAccountID
+}
+
 // ReverseTransactionTx posts an append-only compensating double-entry transaction inverting all original legs.
 func ReverseTransactionTx(ctx context.Context, pool *pgxpool.Pool, params ReversalParams) (*ReversalResult, error) {
 	tx, err := pool.Begin(ctx)
@@ -126,8 +132,7 @@ func ReverseTransactionTx(ctx context.Context, pool *pgxpool.Pool, params Revers
 	for _, leg := range legs {
 		if leg.EntryType == "DEBIT" {
 			totalReversedAmount += leg.Amount
-			// Skip balance check on institutional clearing accounts
-			if leg.AccountID == MpesaClearingAccountID {
+			if isInstitutionalPoolAccount(leg.AccountID) {
 				continue
 			}
 			bal, err := GetAccountBalance(ctx, tx, leg.AccountID)
