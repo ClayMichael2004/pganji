@@ -332,7 +332,19 @@ func main() {
 	assert(delErr != nil && strings.Contains(delErr.Error(), "ledger immutability violation"), "PostgreSQL trigger blocked direct DELETE on journal_entries")
 
 	// -------------------------------------------------------------------------
-	// 8. Cryptographic SHA-256 Hash Chain Verification
+	// 8. RBAC Security Gate on Treasury Audit Endpoints (USER -> 403, ADMIN -> 200)
+	// -------------------------------------------------------------------------
+	unauthAuditStatus, _, _ := client.doJSON("GET", "/audit/verify-chain", nil, nil)
+	assert(unauthAuditStatus == http.StatusForbidden, fmt.Sprintf("Block non-admin user from /audit/verify-chain (HTTP %d)", unauthAuditStatus))
+
+	unauthRecStatus, _, _ := client.doJSON("GET", "/audit/reconcile", nil, nil)
+	assert(unauthRecStatus == http.StatusForbidden, fmt.Sprintf("Block non-admin user from /audit/reconcile (HTTP %d)", unauthRecStatus))
+
+	_, err = pool.Exec(ctx, `UPDATE users SET role = 'ADMIN' WHERE id::text = $1`, authResp.UserID)
+	assert(err == nil, "Promoted E2E user to ADMIN role")
+
+	// -------------------------------------------------------------------------
+	// 9. Cryptographic SHA-256 Hash Chain Verification
 	// -------------------------------------------------------------------------
 	status, raw, err = client.doJSON("GET", "/audit/verify-chain", nil, nil)
 	var chainResp struct {
@@ -345,7 +357,7 @@ func main() {
 		fmt.Sprintf("SHA-256 hash chain VALID across %d entries (trial_balance_net=%d)", chainResp.TotalEntries, chainResp.TrialBalanceNet))
 
 	// -------------------------------------------------------------------------
-	// 9. Multi-Currency Treasury & Clearing Reconciliation
+	// 10. Multi-Currency Treasury & Clearing Reconciliation
 	// -------------------------------------------------------------------------
 	status, raw, err = client.doJSON("GET", "/audit/reconcile", nil, nil)
 	var recResp struct {
@@ -359,5 +371,5 @@ func main() {
 	assert(err == nil && status == http.StatusOK && recResp.OverallStatus == "RECONCILED" && recResp.ClearingReconciliation.Reconciled,
 		fmt.Sprintf("Treasury reconciliation RECONCILED (clearing_discrepancy=%d)", recResp.ClearingReconciliation.ClearingDiscrepancy))
 
-	fmt.Println("\n>>> VERDICT: ALL 9 ENTERPRISE LEDGER INVARIANTS PASSED <<<")
+	fmt.Println("\n>>> VERDICT: ALL 10 ENTERPRISE LEDGER INVARIANTS PASSED <<<")
 }
