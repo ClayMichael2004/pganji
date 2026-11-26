@@ -44,7 +44,7 @@ func VerifyLedgerHashChain(ctx context.Context, pool *pgxpool.Pool) (*LedgerAudi
 		Status:     "VALID",
 	}
 
-	var expectedSeq int64 = 1
+	var lastSeq int64 = 0
 
 	for rows.Next() {
 		var (
@@ -64,16 +64,17 @@ func VerifyLedgerHashChain(ctx context.Context, pool *pgxpool.Pool) (*LedgerAudi
 			report.TotalCredits += amount
 		}
 
-		// 1. Check monotonic sequence continuity (detects deleted rows)
-		if seq != expectedSeq {
+		// 1. Enforce strict monotonic progression (detects non-ascending sequence order or duplicates)
+		if seq <= lastSeq {
 			report.Status = "COMPROMISED"
 			report.BrokenAtSeq = &seq
 			report.BrokenEntryID = id
-			report.FailureDescription = fmt.Sprintf("sequence gap detected: expected seq %d, found %d", expectedSeq, seq)
+			report.FailureDescription = fmt.Sprintf("non-monotonic sequence progression: seq %d <= previous seq %d", seq, lastSeq)
 			return report, nil
 		}
 
-		// 2. Check link to previous block
+		// 2. Enforce cryptographic chain link to previous committed entry
+		// (Detects deleted rows or out-of-order blocks immediately)
 		if prevHash != expectedPrev {
 			report.Status = "COMPROMISED"
 			report.BrokenAtSeq = &seq
@@ -102,7 +103,7 @@ func VerifyLedgerHashChain(ctx context.Context, pool *pgxpool.Pool) (*LedgerAudi
 		report.HeadSeq = seq
 
 		expectedPrev = entryHash
-		expectedSeq++
+		lastSeq = seq
 	}
 
 	if err := rows.Err(); err != nil {

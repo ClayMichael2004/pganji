@@ -51,7 +51,7 @@ func DepositTx(ctx context.Context, pool *pgxpool.Pool, params ClearingParams) (
 		firstID, secondID = secondID, firstID
 	}
 
-	rows, err := tx.Query(ctx, `SELECT id FROM accounts WHERE id IN ($1, $2) FOR UPDATE;`, firstID, secondID)
+	rows, err := tx.Query(ctx, `SELECT id FROM accounts WHERE id IN ($1, $2) ORDER BY id ASC FOR UPDATE;`, firstID, secondID)
 	if err != nil {
 		return "", fmt.Errorf("failed to lock accounts: %w", err)
 	}
@@ -131,7 +131,7 @@ func WithdrawTx(ctx context.Context, pool *pgxpool.Pool, params ClearingParams) 
 		firstID, secondID = secondID, firstID
 	}
 
-	rows, err := tx.Query(ctx, `SELECT id FROM accounts WHERE id IN ($1, $2) FOR UPDATE;`, firstID, secondID)
+	rows, err := tx.Query(ctx, `SELECT id FROM accounts WHERE id IN ($1, $2) ORDER BY id ASC FOR UPDATE;`, firstID, secondID)
 	if err != nil {
 		return "", fmt.Errorf("failed to lock accounts: %w", err)
 	}

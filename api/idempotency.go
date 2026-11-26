@@ -2,17 +2,14 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -61,21 +58,49 @@ func IdempotencyMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 
 			hash := sha256.Sum256(bodyBytes)
 			reqHash := hex.EncodeToString(hash[:])
-			ctx := context.Background()
+			ctx := r.Context()
 
-			// 1. Check if key already exists
-			var (
-				storedHash  string
-				cachedCode  *int
-				cachedBody  []byte
-				lockedUntil time.Time
-			)
+			// 1. Atomic lock acquisition attempt
+			// If key doesn't exist, insert with locked_until.
+			// If key exists and is expired (locked_until < now) without response, acquire lock.
+			// If already completed or actively locked, ON CONFLICT will not update and RowsAffected will be 0.
+			lockQuery := `
+				INSERT INTO idempotency_keys (key, request_path, request_hash, locked_until)
+				VALUES ($1, $2, $3, $4)
+				ON CONFLICT (key) DO UPDATE 
+				SET locked_until = EXCLUDED.locked_until
+				WHERE idempotency_keys.response_code IS NULL 
+				  AND idempotency_keys.locked_until < CURRENT_TIMESTAMP;
+			`
+			tag, err := pool.Exec(ctx, lockQuery, key, r.URL.Path, reqHash, time.Now().Add(30*time.Second))
+			if err != nil {
+				slog.Error("failed to execute idempotency lock query", "err", err, "key", key)
+				JSONResponse(w, http.StatusInternalServerError, map[string]string{
+					"error": "internal idempotency error",
+				})
+				return
+			}
 
-			query := `SELECT request_hash, response_code, response_body, locked_until 
-			          FROM idempotency_keys WHERE key = $1`
-			err = pool.QueryRow(ctx, query, key).Scan(&storedHash, &cachedCode, &cachedBody, &lockedUntil)
+			// If RowsAffected == 0, another request already owns this key or completed it
+			if tag.RowsAffected() == 0 {
+				var (
+					storedHash  string
+					cachedCode  *int
+					cachedBody  []byte
+					lockedUntil time.Time
+				)
 
-			if err == nil {
+				query := `SELECT request_hash, response_code, response_body, locked_until 
+				          FROM idempotency_keys WHERE key = $1`
+				err = pool.QueryRow(ctx, query, key).Scan(&storedHash, &cachedCode, &cachedBody, &lockedUntil)
+				if err != nil {
+					slog.Error("error checking existing idempotency key", "err", err)
+					JSONResponse(w, http.StatusInternalServerError, map[string]string{
+						"error": "internal idempotency lookup failure",
+					})
+					return
+				}
+
 				if storedHash != reqHash {
 					JSONResponse(w, http.StatusUnprocessableEntity, map[string]string{
 						"error": "idempotency key reused with different request payload",
@@ -97,28 +122,9 @@ func IdempotencyMiddleware(pool *pgxpool.Pool) func(http.Handler) http.Handler {
 					})
 					return
 				}
-			} else if !errors.Is(err, pgx.ErrNoRows) {
-				slog.Error("error checking idempotency key", "err", err)
 			}
 
-			// 2. Lock and register initial entry
-			lockQuery := `
-				INSERT INTO idempotency_keys (key, request_path, request_hash, locked_until)
-				VALUES ($1, $2, $3, $4)
-				ON CONFLICT (key) DO UPDATE 
-				SET locked_until = $4
-				WHERE idempotency_keys.response_code IS NULL;
-			`
-			_, err = pool.Exec(ctx, lockQuery, key, r.URL.Path, reqHash, time.Now().Add(30*time.Second))
-			if err != nil {
-				slog.Error("failed to insert/lock idempotency key", "err", err)
-				JSONResponse(w, http.StatusConflict, map[string]string{
-					"error": "concurrent request detected for this idempotency key",
-				})
-				return
-			}
-
-			// 3. Execute downstream handler through the recorder
+			// 2. Execute downstream handler through the recorder
 			rec := &responseRecorder{
 				ResponseWriter: w,
 				statusCode:     0,
