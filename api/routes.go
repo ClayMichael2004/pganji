@@ -37,6 +37,8 @@ func (s *Server) Routes() http.Handler{
 		// Public API Documentation & OpenAPI 3.1 Specification
 		r.Get("/openapi.yaml", s.HandleOpenAPISpec)
 		r.Get("/docs", s.HandleSwaggerUI)
+		r.Head("/openapi.yaml", s.HandleOpenAPISpec)
+		r.Head("/docs", s.HandleSwaggerUI)
 		r.Post("/webhooks/mpesa/c2b", s.HandleMpesaDepositWebhook)
 
 		// External Provider Settlement Webhooks (HMAC-SHA256 authenticated)
