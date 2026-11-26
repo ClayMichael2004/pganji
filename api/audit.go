@@ -20,3 +20,18 @@ func (s *Server) HandleVerifyLedgerChain(w http.ResponseWriter, r *http.Request)
 
 	JSONResponse(w, statusCode, report)
 }
+
+func (s *Server) HandleReconciliationReport(w http.ResponseWriter, r *http.Request) {
+	report, err := db.GenerateReconciliationReport(r.Context(), s.Pool)
+	if err != nil {
+		ErrorResponse(w, http.StatusInternalServerError, "failed to generate reconciliation report")
+		return
+	}
+
+	statusCode := http.StatusOK
+	if report.OverallStatus != "RECONCILED" {
+		statusCode = http.StatusConflict
+	}
+
+	JSONResponse(w, statusCode, report)
+}
