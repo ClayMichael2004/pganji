@@ -12,6 +12,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"pganji/metrics"
 	"pganji/outbox"
 )
 
@@ -188,7 +189,7 @@ func ConvertCurrencyTx(ctx context.Context, pool *pgxpool.Pool, params FXConvert
 		return nil, fmt.Errorf("insufficient %s funds: available %d, required %d", fromCurrency, srcBalance, params.SourceAmount)
 	}
 
-	// 4. Exact rational arithmetic for minor-unit conversion (half-even rounding)
+	// 4. Exact rational arithmetic for minor-unit conversion (half-up rounding)
 	targetAmount, err := computeConvertedMinorUnits(params.SourceAmount, rateStr)
 	if err != nil {
 		return nil, err
@@ -264,6 +265,11 @@ func ConvertCurrencyTx(ctx context.Context, pool *pgxpool.Pool, params FXConvert
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("failed to commit FX conversion transaction: %w", err)
 	}
+
+	// Record Prometheus FX telemetry after commit
+	metrics.FXConversionsTotal.WithLabelValues(fromCurrency, toCurrency).Inc()
+	metrics.FXVolumeMinorUnitsTotal.WithLabelValues("source", fromCurrency).Add(float64(params.SourceAmount))
+	metrics.FXVolumeMinorUnitsTotal.WithLabelValues("target", toCurrency).Add(float64(targetAmount))
 
 	return &FXConvertResult{
 		TransactionID:  txID,

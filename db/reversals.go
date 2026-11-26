@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"pganji/metrics"
 	"pganji/outbox"
 )
 
@@ -42,9 +43,9 @@ func ReverseTransactionTx(ctx context.Context, pool *pgxpool.Pool, params Revers
 
 	// 1. Lock the original transaction row to serialize concurrent reversal attempts
 	var (
-		origRef          string
-		origStatus       string
-		alreadyReversed  *string
+		origRef         string
+		origStatus      string
+		alreadyReversed *string
 	)
 	err = tx.QueryRow(ctx, `
 		SELECT reference, status, reversed_transaction_id
@@ -184,6 +185,12 @@ func ReverseTransactionTx(ctx context.Context, pool *pgxpool.Pool, params Revers
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("failed to commit reversal transaction: %w", err)
 	}
+
+	revSource := "MANUAL_API"
+	if params.InitiatedByUserID == "SYSTEM_CLEARING_GATEWAY" {
+		revSource = "B2C_AUTO_REVERSAL"
+	}
+	metrics.ReversalsTotal.WithLabelValues(revSource).Inc()
 
 	return &ReversalResult{
 		ReversalTransactionID: reversalTxID,

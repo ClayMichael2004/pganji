@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"pganji/metrics"
 	"pganji/outbox"
 )
 
@@ -111,6 +112,9 @@ func DepositTx(ctx context.Context, pool *pgxpool.Pool, params ClearingParams) (
 		return "", fmt.Errorf("failed to commit deposit tx: %w", err)
 	}
 
+	metrics.ClearingOperationsTotal.WithLabelValues(params.Provider, "DEPOSIT", "SETTLED").Inc()
+	metrics.ClearingVolumeMinorUnitsTotal.WithLabelValues("DEPOSIT", "SETTLED").Add(float64(params.Amount))
+
 	return txID, nil
 }
 
@@ -191,6 +195,9 @@ func WithdrawTx(ctx context.Context, pool *pgxpool.Pool, params ClearingParams) 
 		return "", fmt.Errorf("failed to commit withdrawal tx: %w", err)
 	}
 
+	metrics.ClearingOperationsTotal.WithLabelValues(params.Provider, "WITHDRAWAL", "INITIATED").Inc()
+	metrics.ClearingVolumeMinorUnitsTotal.WithLabelValues("WITHDRAWAL", "INITIATED").Add(float64(params.Amount))
+
 	return txID, nil
 }
 
@@ -263,6 +270,9 @@ func SettleB2CResultTx(ctx context.Context, pool *pgxpool.Pool, params B2CCallba
 			return nil, fmt.Errorf("failed to commit B2C settlement: %w", err)
 		}
 
+		metrics.ClearingOperationsTotal.WithLabelValues("MPESA", "WITHDRAWAL", "SETTLED").Inc()
+		metrics.ClearingVolumeMinorUnitsTotal.WithLabelValues("WITHDRAWAL", "SETTLED").Add(float64(amount))
+
 		return &B2CSettlementOutcome{
 			ExternalReference:     params.ExternalReference,
 			OriginalTransactionID: origTxID,
@@ -306,6 +316,9 @@ func SettleB2CResultTx(ctx context.Context, pool *pgxpool.Pool, params B2CCallba
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("failed to commit B2C failure status: %w", err)
 	}
+
+	metrics.ClearingOperationsTotal.WithLabelValues("MPESA", "WITHDRAWAL", finalStatus).Inc()
+	metrics.ClearingVolumeMinorUnitsTotal.WithLabelValues("WITHDRAWAL", finalStatus).Add(float64(amount))
 
 	// Execute append-only compensating reversal to refund the user's wallet
 	revReason := fmt.Sprintf("%s (code=%d): %s", reasonPrefix, params.ResultCode, params.ResultDesc)
