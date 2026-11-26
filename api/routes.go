@@ -40,12 +40,14 @@ func (s *Server) Routes() http.Handler{
 		r.Post("/webhooks/mpesa/b2c/result", s.HandleMpesaB2CResultWebhook)
 		r.Post("/webhooks/mpesa/b2c/timeout", s.HandleMpesaB2CTimeoutWebhook)
 
-		
+
 		// Protected Financial Endpoints
 		r.Group(func(protected chi.Router) {
 			protected.Use(AuthMiddleware)
 
 			// Statement / History Pagination
+			protected.Post("/accounts", s.HandleCreateAccount)
+			protected.Get("/accounts", s.HandleListAccounts)
 			protected.Get("/accounts/statement", s.HandleGetAccountStatement)
 			protected.Get("/accounts/balance", s.HandleGetBalance)
 			protected.Get("/account/balance", s.HandleGetBalance)
