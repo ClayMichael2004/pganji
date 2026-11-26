@@ -48,6 +48,7 @@ func (s *Server) Routes() http.Handler{
 			protected.Group(func(idemp chi.Router) {
 				idemp.Use(IdempotencyMiddleware(s.Pool))
 				idemp.Post("/transfers", s.HandleTransfer)
+				idemp.Post("/transfers/reverse", s.HandleReverseTransaction)
 				idemp.Post("/clearing/withdraw", s.HandleWithdraw)
 			})
 		})
