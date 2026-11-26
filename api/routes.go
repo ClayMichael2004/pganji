@@ -69,6 +69,13 @@ func (s *Server) Routes() http.Handler{
 				idemp.Post("/fx/convert", s.HandleFXConvert)
 			})
 		})
+
+		// Treasury & Cryptographic Audit Endpoints (ADMIN role required)
+		r.Group(func(r chi.Router) {
+			r.Use(s.RequireAdmin)
+			r.Get("/audit/verify-chain", s.HandleVerifyChain)
+			r.Get("/audit/reconcile", s.HandleReconcile)
+		})
 	})
 
 	return r
