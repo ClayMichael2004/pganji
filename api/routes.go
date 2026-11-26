@@ -34,6 +34,13 @@ func (s *Server) Routes() http.Handler{
 		r.Post("/auth/register", s.HandleRegister)
 		r.Post("/auth/login", s.HandleLogin)
 		r.Post("/webhooks/mpesa/c2b", s.HandleMpesaDepositWebhook)
+
+		// External Provider Settlement Webhooks (HMAC-SHA256 authenticated)
+		r.Post("/webhooks/mpesa/c2b", s.HandleMpesaDepositWebhook)
+		r.Post("/webhooks/mpesa/b2c/result", s.HandleMpesaB2CResultWebhook)
+		r.Post("/webhooks/mpesa/b2c/timeout", s.HandleMpesaB2CTimeoutWebhook)
+
+		
 		// Protected Financial Endpoints
 		r.Group(func(protected chi.Router) {
 			protected.Use(AuthMiddleware)
