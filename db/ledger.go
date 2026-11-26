@@ -59,6 +59,17 @@ func TransferTx(ctx context.Context, pool *pgxpool.Pool, params TransferParams) 
 	}
 	rows.Close()
 
+	var c1, c2 string
+	if err := tx.QueryRow(ctx, `SELECT currency FROM accounts WHERE id = $1`, params.FromAccountID).Scan(&c1); err != nil {
+		return fmt.Errorf("sender account not found: %w", err)
+	}
+	if err := tx.QueryRow(ctx, `SELECT currency FROM accounts WHERE id = $1`, params.ToAccountID).Scan(&c2); err != nil {
+		return fmt.Errorf("receiver account not found: %w", err)
+	}
+	if c1 != c2 {
+		return fmt.Errorf("currency mismatch (%s vs %s): use /api/v1/fx/convert for cross-currency transfers", c1, c2)
+	}
+
 	// 3. Verify sender balance
 	senderBalance, err := GetAccountBalance(ctx, tx, params.FromAccountID)
 	if err != nil {
