@@ -205,6 +205,27 @@ func main() {
 	_ = json.Unmarshal(raw, &fxResp)
 	assert(fxResp.TargetAmount == 1000, fmt.Sprintf("Exact rational FX conversion output: %d USD cents (expected 1000)", fxResp.TargetAmount))
 
+	// Verify Real-time FX Rates Board & Guaranteed RFQ Quote (30s TTL)
+	ratesStatus, ratesRaw, _ := client.doJSON("GET", "/fx/rates", nil, nil)
+	assert(ratesStatus == http.StatusOK, fmt.Sprintf("Query live real-time FX rate board (HTTP %d)", ratesStatus))
+
+	quoteStatus, quoteRaw, _ := client.doJSON("POST", "/fx/quote", map[string]any{
+		"source_currency": "USD",
+		"target_currency": "KES",
+		"source_amount":   1000,
+	}, nil)
+	assert(quoteStatus == http.StatusCreated, fmt.Sprintf("Request guaranteed RFQ quote with TTL (HTTP %d)", quoteStatus))
+
+	var qResp struct {
+		ID           string `json:"id"`
+		TargetAmount int64  `json:"target_amount"`
+		TTLSeconds   int64  `json:"ttl_seconds"`
+	}
+	_ = json.Unmarshal(quoteRaw, &qResp)
+	assert(qResp.ID != "" && qResp.TargetAmount > 0 && qResp.TTLSeconds == 30,
+		fmt.Sprintf("Issued valid RFQ quote id=%s target_amount=%d ttl=%ds", qResp.ID, qResp.TargetAmount, qResp.TTLSeconds))
+	_ = ratesRaw
+
 	// -------------------------------------------------------------------------
 	// 4. Internal Transfer + Compensating Reversal + Double-Reversal Guard
 	// -------------------------------------------------------------------------
@@ -334,6 +355,7 @@ func main() {
 	// -------------------------------------------------------------------------
 	// 8. RBAC Security Gate on Treasury Audit Endpoints (USER -> 403, ADMIN -> 200)
 	// -------------------------------------------------------------------------
+	time.Sleep(200 * time.Millisecond)
 	unauthAuditStatus, _, _ := client.doJSON("GET", "/audit/verify-chain", nil, nil)
 	assert(unauthAuditStatus == http.StatusForbidden, fmt.Sprintf("Block non-admin user from /audit/verify-chain (HTTP %d)", unauthAuditStatus))
 

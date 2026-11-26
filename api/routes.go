@@ -41,6 +41,9 @@ func (s *Server) Routes() http.Handler {
 		r.Get("/docs", s.HandleSwaggerUI)
 		r.Head("/docs", s.HandleSwaggerUI)
 
+		// Public Real-Time FX Rate Board
+		r.Get("/fx/rates", s.HandleListFXRates)
+
 		// External Provider Settlement Webhooks (HMAC-SHA256 authenticated)
 		r.Post("/webhooks/mpesa/c2b", s.HandleMpesaDepositWebhook)
 		r.Post("/webhooks/mpesa/b2c/result", s.HandleMpesaB2CResultWebhook)
@@ -57,9 +60,13 @@ func (s *Server) Routes() http.Handler {
 			protected.Get("/accounts/balance", s.HandleGetBalance)
 			protected.Get("/account/balance", s.HandleGetBalance)
 
+			// Guaranteed RFQ FX Quote
+			protected.Post("/fx/quote", s.HandleCreateFXQuote)
+
 			// Treasury & Cryptographic Audit Endpoints (AuthMiddleware -> RequireAdmin)
 			protected.With(s.RequireAdmin).Get("/audit/verify-chain", s.HandleVerifyLedgerChain)
 			protected.With(s.RequireAdmin).Get("/audit/reconcile", s.HandleReconciliationReport)
+			protected.With(s.RequireAdmin).Post("/fx/rates", s.HandleUpdateFXRate)
 
 			// Idempotent Money Movement
 			protected.Group(func(idemp chi.Router) {

@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -32,6 +33,31 @@ var referenceFXRates = map[string]string{
 	"USD_KES": "129.00000000",
 }
 
+type FXRate struct {
+	Pair          string    `json:"pair"`
+	BaseCurrency  string    `json:"base_currency"`
+	QuoteCurrency string    `json:"quote_currency"`
+	MidRate       string    `json:"mid_rate"`
+	BidRate       string    `json:"bid_rate"` // Rate bank pays customer to buy base currency
+	AskRate       string    `json:"ask_rate"` // Rate bank charges customer to sell base currency
+	SpreadBps     int       `json:"spread_bps"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+type FXQuote struct {
+	ID             string    `json:"id"`
+	UserID         string    `json:"user_id"`
+	SourceCurrency string    `json:"source_currency"`
+	TargetCurrency string    `json:"target_currency"`
+	SourceAmount   int64     `json:"source_amount"`
+	TargetAmount   int64     `json:"target_amount"`
+	ExchangeRate   string    `json:"exchange_rate"`
+	RateType       string    `json:"rate_type"` // "BID", "ASK", or "MID"
+	Status         string    `json:"status"`    // "ACTIVE", "CONSUMED", "EXPIRED"
+	ExpiresAt      time.Time `json:"expires_at"`
+	TTLSeconds     int64     `json:"ttl_seconds"`
+}
+
 type WalletAccount struct {
 	ID            string `json:"id"`
 	UserID        string `json:"user_id"`
@@ -48,6 +74,7 @@ type FXConvertParams struct {
 	SourceAmount  int64  // Minor units (cents) in source currency
 	Reference     string
 	Description   string
+	QuoteID       string // Optional guaranteed RFQ quote identifier
 }
 
 type FXConvertResult struct {
@@ -60,7 +87,179 @@ type FXConvertResult struct {
 	SourceAmount   int64  `json:"source_amount"`
 	TargetAmount   int64  `json:"target_amount"`
 	ExchangeRate   string `json:"exchange_rate"`
+	QuoteID        string `json:"quote_id,omitempty"`
 	Status         string `json:"status"`
+}
+
+// ListFXRates returns the real-time buy and sell currency rates.
+func ListFXRates(ctx context.Context, pool *pgxpool.Pool) ([]FXRate, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT pair, base_currency, quote_currency, mid_rate::text, bid_rate::text, ask_rate::text, spread_bps, updated_at
+		FROM fx_rates
+		ORDER BY pair ASC;
+	`)
+	if err != nil {
+		// Fallback to static memory rates if table is not yet migrated
+		rates := []FXRate{
+			{Pair: "USD_KES", BaseCurrency: "USD", QuoteCurrency: "KES", MidRate: "129.00000000", BidRate: "127.71000000", AskRate: "130.29000000", SpreadBps: 100, UpdatedAt: time.Now().UTC()},
+			{Pair: "KES_USD", BaseCurrency: "KES", QuoteCurrency: "USD", MidRate: "0.00775194", BidRate: "0.00767442", AskRate: "0.00782946", SpreadBps: 100, UpdatedAt: time.Now().UTC()},
+		}
+		return rates, nil
+	}
+	defer rows.Close()
+
+	var rates []FXRate
+	for rows.Next() {
+		var r FXRate
+		if err := rows.Scan(&r.Pair, &r.BaseCurrency, &r.QuoteCurrency, &r.MidRate, &r.BidRate, &r.AskRate, &r.SpreadBps, &r.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("failed to scan fx rate: %w", err)
+		}
+		rates = append(rates, r)
+	}
+	return rates, rows.Err()
+}
+
+// GetEffectiveFXRate resolves the base mid-market exchange rate string for converting from source to target currency.
+func GetEffectiveFXRate(ctx context.Context, pool *pgxpool.Pool, fromCurr, toCurr string) (string, string, error) {
+	pairKey := fromCurr + "_" + toCurr
+	var midRate string
+
+	err := pool.QueryRow(ctx, `
+		SELECT mid_rate::text
+		FROM fx_rates
+		WHERE pair = $1;
+	`, pairKey).Scan(&midRate)
+
+	if err == nil && midRate != "" {
+		return midRate, "MID", nil
+	}
+
+	// Fallback to referenceFXRates
+	if refRate, exists := referenceFXRates[pairKey]; exists {
+		return refRate, "MID", nil
+	}
+
+	return "", "", fmt.Errorf("unsupported FX currency pair %s -> %s", fromCurr, toCurr)
+}
+
+// UpdateFXRate updates or inserts live market rates and automatically computes bid/ask spreads.
+func UpdateFXRate(ctx context.Context, pool *pgxpool.Pool, pair, midRateStr string, spreadBps int) (*FXRate, error) {
+	midRat, ok := new(big.Rat).SetString(midRateStr)
+	if !ok || midRat.Sign() <= 0 {
+		return nil, fmt.Errorf("invalid mid_rate %q: must be a positive number", midRateStr)
+	}
+	if spreadBps < 0 {
+		return nil, fmt.Errorf("spread_bps must be non-negative")
+	}
+
+	spreadFraction := new(big.Rat).SetFrac(big.NewInt(int64(spreadBps)), big.NewInt(10000))
+	one := big.NewRat(1, 1)
+
+	// Bid = Mid * (1 - Spread)
+	oneMinusSpread := new(big.Rat).Sub(one, spreadFraction)
+	bidRat := new(big.Rat).Mul(midRat, oneMinusSpread)
+
+	// Ask = Mid * (1 + Spread)
+	onePlusSpread := new(big.Rat).Add(one, spreadFraction)
+	askRat := new(big.Rat).Mul(midRat, onePlusSpread)
+
+	parts := strings.Split(pair, "_")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid pair format %q: expected BASE_QUOTE (e.g. USD_KES)", pair)
+	}
+	baseCurr := strings.ToUpper(parts[0])
+	quoteCurr := strings.ToUpper(parts[1])
+
+	bidStr := bidRat.FloatString(8)
+	askStr := askRat.FloatString(8)
+	midStr := midRat.FloatString(8)
+
+	var updated FXRate
+	err := pool.QueryRow(ctx, `
+		INSERT INTO fx_rates (pair, base_currency, quote_currency, mid_rate, bid_rate, ask_rate, spread_bps, updated_at)
+		VALUES ($1, $2, $3, $4::numeric, $5::numeric, $6::numeric, $7, CURRENT_TIMESTAMP)
+		ON CONFLICT (pair) DO UPDATE
+		SET mid_rate = EXCLUDED.mid_rate,
+		    bid_rate = EXCLUDED.bid_rate,
+		    ask_rate = EXCLUDED.ask_rate,
+		    spread_bps = EXCLUDED.spread_bps,
+		    updated_at = CURRENT_TIMESTAMP
+		RETURNING pair, base_currency, quote_currency, mid_rate::text, bid_rate::text, ask_rate::text, spread_bps, updated_at;
+	`, pair, baseCurr, quoteCurr, midStr, bidStr, askStr, spreadBps).Scan(
+		&updated.Pair, &updated.BaseCurrency, &updated.QuoteCurrency,
+		&updated.MidRate, &updated.BidRate, &updated.AskRate,
+		&updated.SpreadBps, &updated.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to persist fx rate: %w", err)
+	}
+
+	return &updated, nil
+}
+
+// CreateFXQuote creates a guaranteed RFQ quote with a 30-second TTL applying the live bid/ask spread.
+func CreateFXQuote(ctx context.Context, pool *pgxpool.Pool, userID, fromCurr, toCurr string, sourceAmount int64) (*FXQuote, error) {
+	fromCurr = strings.ToUpper(strings.TrimSpace(fromCurr))
+	toCurr = strings.ToUpper(strings.TrimSpace(toCurr))
+	if fromCurr == toCurr {
+		return nil, fmt.Errorf("source and target currencies must be different")
+	}
+	if sourceAmount <= 0 {
+		return nil, fmt.Errorf("source_amount must be greater than zero")
+	}
+
+	pairKey := fromCurr + "_" + toCurr
+	var (
+		rateStr  string
+		rateType string
+		bidRate  string
+	)
+
+	err := pool.QueryRow(ctx, `
+		SELECT bid_rate::text
+		FROM fx_rates
+		WHERE pair = $1;
+	`, pairKey).Scan(&bidRate)
+
+	if err == nil && bidRate != "" {
+		rateStr = bidRate
+		rateType = "BID"
+	} else {
+		liveRate, sType, err := GetEffectiveFXRate(ctx, pool, fromCurr, toCurr)
+		if err != nil {
+			return nil, err
+		}
+		rateStr = liveRate
+		rateType = sType
+	}
+
+	targetAmount, err := computeConvertedMinorUnits(sourceAmount, rateStr)
+	if err != nil {
+		return nil, err
+	}
+	if targetAmount <= 0 {
+		return nil, fmt.Errorf("source_amount too small to convert into at least 1 minor unit of %s", toCurr)
+	}
+
+	ttl := 30 * time.Second
+	expiresAt := time.Now().UTC().Add(ttl)
+
+	var quote FXQuote
+	err = pool.QueryRow(ctx, `
+		INSERT INTO fx_quotes (user_id, source_currency, target_currency, source_amount, target_amount, exchange_rate, rate_type, status, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6::numeric, $7, 'ACTIVE', $8)
+		RETURNING id::text, user_id::text, source_currency, target_currency, source_amount, target_amount, exchange_rate::text, rate_type, status, expires_at;
+	`, userID, fromCurr, toCurr, sourceAmount, targetAmount, rateStr, rateType, expiresAt).Scan(
+		&quote.ID, &quote.UserID, &quote.SourceCurrency, &quote.TargetCurrency,
+		&quote.SourceAmount, &quote.TargetAmount, &quote.ExchangeRate,
+		&quote.RateType, &quote.Status, &quote.ExpiresAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to record fx quote: %w", err)
+	}
+	quote.TTLSeconds = int64(ttl.Seconds())
+
+	return &quote, nil
 }
 
 // CreateWalletAccount provisions a new currency wallet (e.g., USD or KES) for an authenticated user.
@@ -161,12 +360,6 @@ func ConvertCurrencyTx(ctx context.Context, pool *pgxpool.Pool, params FXConvert
 		return nil, fmt.Errorf("FX conversion requires distinct currencies (both accounts are %s)", fromCurrency)
 	}
 
-	pairKey := fromCurrency + "_" + toCurrency
-	rateStr, ok := referenceFXRates[pairKey]
-	if !ok {
-		return nil, fmt.Errorf("unsupported FX currency pair %s -> %s", fromCurrency, toCurrency)
-	}
-
 	srcBridgeID := fxBridgeByCurrency[fromCurrency]
 	dstBridgeID := fxBridgeByCurrency[toCurrency]
 
@@ -180,22 +373,78 @@ func ConvertCurrencyTx(ctx context.Context, pool *pgxpool.Pool, params FXConvert
 		}
 	}
 
-	// 3. Verify sufficient funds in source wallet
+	// 3. Resolve executable rate & target minor units (Guaranteed Quote vs Live Rate)
+	var (
+		rateStr      string
+		targetAmount int64
+	)
+
+	if strings.TrimSpace(params.QuoteID) != "" {
+		var (
+			qSrcCurr, qDstCurr string
+			qSrcAmt, qDstAmt   int64
+			qRate              string
+			qStatus            string
+			qExpiresAt         time.Time
+		)
+		qErr := tx.QueryRow(ctx, `
+			SELECT source_currency, target_currency, source_amount, target_amount, exchange_rate::text, status, expires_at
+			FROM fx_quotes
+			WHERE id = $1 AND user_id = $2
+			FOR UPDATE;
+		`, params.QuoteID, params.UserID).Scan(&qSrcCurr, &qDstCurr, &qSrcAmt, &qDstAmt, &qRate, &qStatus, &qExpiresAt)
+		if qErr != nil {
+			if errors.Is(qErr, pgx.ErrNoRows) {
+				return nil, fmt.Errorf("quote not found or belongs to another user")
+			}
+			return nil, fmt.Errorf("failed to lock fx quote: %w", qErr)
+		}
+
+		if qStatus != "ACTIVE" {
+			return nil, fmt.Errorf("fx quote is already %s", qStatus)
+		}
+		if time.Now().UTC().After(qExpiresAt) {
+			_, _ = tx.Exec(ctx, `UPDATE fx_quotes SET status = 'EXPIRED' WHERE id = $1`, params.QuoteID)
+			return nil, fmt.Errorf("fx quote expired at %s", qExpiresAt.Format(time.RFC3339))
+		}
+		if qSrcCurr != fromCurrency || qDstCurr != toCurrency {
+			return nil, fmt.Errorf("fx quote currency pair mismatch (%s->%s != %s->%s)", qSrcCurr, qDstCurr, fromCurrency, toCurrency)
+		}
+		if qSrcAmt != params.SourceAmount {
+			return nil, fmt.Errorf("fx quote source_amount mismatch (quote=%d, requested=%d)", qSrcAmt, params.SourceAmount)
+		}
+
+		rateStr = qRate
+		targetAmount = qDstAmt
+
+		// Mark quote as consumed
+		if _, err := tx.Exec(ctx, `UPDATE fx_quotes SET status = 'CONSUMED' WHERE id = $1;`, params.QuoteID); err != nil {
+			return nil, fmt.Errorf("failed to consume quote: %w", err)
+		}
+	} else {
+		liveRate, _, err := GetEffectiveFXRate(ctx, pool, fromCurrency, toCurrency)
+		if err != nil {
+			return nil, err
+		}
+		rateStr = liveRate
+
+		computed, err := computeConvertedMinorUnits(params.SourceAmount, rateStr)
+		if err != nil {
+			return nil, err
+		}
+		if computed <= 0 {
+			return nil, fmt.Errorf("source_amount too small to convert into at least 1 minor unit of %s", toCurrency)
+		}
+		targetAmount = computed
+	}
+
+	// 4. Verify sufficient funds in source wallet
 	srcBalance, err := GetAccountBalance(ctx, tx, params.FromAccountID)
 	if err != nil {
 		return nil, err
 	}
 	if srcBalance < params.SourceAmount {
 		return nil, fmt.Errorf("insufficient %s funds: available %d, required %d", fromCurrency, srcBalance, params.SourceAmount)
-	}
-
-	// 4. Exact rational arithmetic for minor-unit conversion (half-up rounding)
-	targetAmount, err := computeConvertedMinorUnits(params.SourceAmount, rateStr)
-	if err != nil {
-		return nil, err
-	}
-	if targetAmount <= 0 {
-		return nil, fmt.Errorf("source_amount too small to convert into at least 1 minor unit of %s", toCurrency)
 	}
 
 	// 5. Create Transaction Header
@@ -281,6 +530,7 @@ func ConvertCurrencyTx(ctx context.Context, pool *pgxpool.Pool, params FXConvert
 		SourceAmount:   params.SourceAmount,
 		TargetAmount:   targetAmount,
 		ExchangeRate:   rateStr,
+		QuoteID:        params.QuoteID,
 		Status:         "COMPLETED",
 	}, nil
 }

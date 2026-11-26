@@ -766,6 +766,90 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /api/v1/fx/rates:
+    get:
+      tags: [Ledger & FX]
+      summary: Get live real-time FX buy and sell rates with bid/ask spreads
+      responses:
+        "200":
+          description: Real-time FX rates board
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  rates:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        pair: { type: string, example: "USD_KES" }
+                        base_currency: { type: string, example: "USD" }
+                        quote_currency: { type: string, example: "KES" }
+                        mid_rate: { type: string, example: "129.00000000" }
+                        bid_rate: { type: string, example: "127.71000000" }
+                        ask_rate: { type: string, example: "130.29000000" }
+                        spread_bps: { type: integer, example: 100 }
+                        updated_at: { type: string, format: date-time }
+                  count: { type: integer, example: 2 }
+    post:
+      tags: [Ledger & FX]
+      summary: Update live market FX rate and spread (ADMIN only)
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pair, mid_rate]
+              properties:
+                pair: { type: string, example: "USD_KES" }
+                mid_rate: { type: string, example: "129.50000000" }
+                spread_bps: { type: integer, example: 100 }
+      responses:
+        "200":
+          description: Updated FX rate with recomputed bid/ask spreads
+        "403":
+          description: Forbidden (ADMIN role required)
+
+  /api/v1/fx/quote:
+    post:
+      tags: [Ledger & FX]
+      summary: Request guaranteed RFQ quote with 30-second TTL
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source_currency, target_currency, source_amount]
+              properties:
+                source_currency: { type: string, example: "USD" }
+                target_currency: { type: string, example: "KES" }
+                source_amount: { type: integer, example: 1000 }
+      responses:
+        "201":
+          description: Guaranteed RFQ quote issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  source_currency: { type: string, example: "USD" }
+                  target_currency: { type: string, example: "KES" }
+                  source_amount: { type: integer, example: 1000 }
+                  target_amount: { type: integer, example: 127710 }
+                  exchange_rate: { type: string, example: "127.71000000" }
+                  rate_type: { type: string, example: "BID" }
+                  status: { type: string, example: "ACTIVE" }
+                  expires_at: { type: string, format: date-time }
+                  ttl_seconds: { type: integer, example: 30 }
+
   /api/v1/fx/convert:
     post:
       tags: [Ledger & FX]

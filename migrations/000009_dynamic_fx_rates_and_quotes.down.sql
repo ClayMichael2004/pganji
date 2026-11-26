@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS fx_quotes;
+DROP TABLE IF EXISTS fx_rates;
