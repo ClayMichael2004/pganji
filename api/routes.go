@@ -59,6 +59,7 @@ func (s *Server) Routes() http.Handler{
 				idemp.Post("/transfers", s.HandleTransfer)
 				idemp.Post("/transfers/reverse", s.HandleReverseTransaction)
 				idemp.Post("/clearing/withdraw", s.HandleWithdraw)
+				idemp.Post("/fx/convert", s.HandleFXConvert)
 			})
 		})
 	})
