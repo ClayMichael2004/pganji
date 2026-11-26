@@ -52,6 +52,7 @@ func (s *Server) Routes() http.Handler{
 			protected.Get("/accounts/balance", s.HandleGetBalance)
 			protected.Get("/account/balance", s.HandleGetBalance)
 			protected.Get("/audit/verify-chain", s.HandleVerifyLedgerChain)
+			protected.Get("/audit/reconcile", s.HandleReconciliationReport)
 
 			// Idempotent Money Movement
 			protected.Group(func(idemp chi.Router) {
