@@ -1,0 +1,956 @@
+openapi: 3.1.0
+info:
+  title: Pganji Enterprise Financial Ledger API
+  version: 1.0.0
+  description: |
+    Tamper-evident, append-only double-entry financial ledger, multi-currency FX conversion desk,
+    and HMAC-authenticated M-Pesa C2B/B2C external clearing engine built in Go and PostgreSQL.
+  contact:
+    name: Pganji Engineering
+servers:
+  - url: http://localhost:8080
+    description: Local Development Server
+
+tags:
+  - name: Authentication
+    description: User registration and JWT bearer token issuance
+  - name: Accounts & Wallets
+    description: Multi-currency wallet provisioning, balances, and journal statements
+  - name: Ledger & FX
+    description: Same-currency double-entry transfers, compensating reversals, and cross-currency FX conversions
+  - name: External Clearing & Webhooks
+    description: M-Pesa B2C payout initiation and HMAC-SHA256 authenticated C2B/B2C provider callbacks
+  - name: Audit & Observability
+    description: Cryptographic SHA-256 hash-chain verification, treasury reconciliation, and Prometheus metrics
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT bearer token returned by `/api/v1/auth/register` or `/api/v1/auth/login`.
+    WebhookHMACAuth:
+      type: apiKey
+      in: header
+      name: X-Pganji-Signature
+      description: |
+        HMAC-SHA256 signature computed over `<X-Pganji-Timestamp>.<raw_json_body>` formatted as `sha256=<hex_digest>`.
+        Must be paired with `X-Pganji-Timestamp` within a 5-minute replay window.
+
+  parameters:
+    IdempotencyKeyHeader:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: Unique client-generated key ensuring exactly-once execution on retries.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        example: idem-tx-20261126-001
+    WebhookTimestampHeader:
+      name: X-Pganji-Timestamp
+      in: header
+      required: true
+      description: Unix epoch timestamp in seconds used in HMAC payload signing and replay protection.
+      schema:
+        type: string
+        example: "1795683617"
+    WebhookSignatureHeader:
+      name: X-Pganji-Signature
+      in: header
+      required: true
+      description: Hex-encoded HMAC-SHA256 digest prefixed with `sha256=`.
+      schema:
+        type: string
+        pattern: "^sha256=[a-f0-9]{64}$"
+        example: sha256=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+
+  schemas:
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          example: insufficient funds
+
+    AuthRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          example: trader@pganji.io
+        password:
+          type: string
+          format: password
+          minLength: 8
+          example: Password123!
+        full_name:
+          type: string
+          example: Alice Trader
+
+    AuthResponse:
+      type: object
+      required: [token, user_id, email]
+      properties:
+        token:
+          type: string
+        user_id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+
+    CreateAccountRequest:
+      type: object
+      required: [currency]
+      properties:
+        currency:
+          type: string
+          enum: [KES, USD]
+          example: USD
+
+    WalletAccount:
+      type: object
+      required: [id, user_id, account_number, currency, type, balance]
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        account_number:
+          type: string
+          example: ACC-USD-0AE63035
+        currency:
+          type: string
+          enum: [KES, USD]
+        type:
+          type: string
+          enum: [ASSET, LIABILITY]
+        balance:
+          type: integer
+          format: int64
+          description: Derived balance in minor units (cents).
+          example: 371000
+
+    AccountListResponse:
+      type: object
+      required: [accounts, count]
+      properties:
+        accounts:
+          type: array
+          items:
+            $ref: "#/components/schemas/WalletAccount"
+        count:
+          type: integer
+          example: 2
+
+    BalanceResponse:
+      type: object
+      required: [account_id, balance]
+      properties:
+        account_id:
+          type: string
+          format: uuid
+        balance:
+          type: integer
+          format: int64
+          example: 371000
+
+    JournalEntry:
+      type: object
+      required: [id, seq, transaction_id, account_id, entry_type, amount, prev_hash, entry_hash, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        seq:
+          type: integer
+          format: int64
+        transaction_id:
+          type: string
+          format: uuid
+        account_id:
+          type: string
+          format: uuid
+        entry_type:
+          type: string
+          enum: [DEBIT, CREDIT]
+        amount:
+          type: integer
+          format: int64
+        prev_hash:
+          type: string
+        entry_hash:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    TransferRequest:
+      type: object
+      required: [from_account_id, to_account_id, amount, reference]
+      properties:
+        from_account_id:
+          type: string
+          format: uuid
+        to_account_id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          example: 10000
+        reference:
+          type: string
+          example: TX-20261126-001
+        description:
+          type: string
+          example: Supplier invoice settlement
+
+    TransferResponse:
+      type: object
+      required: [transaction_id, reference, status]
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        reference:
+          type: string
+        status:
+          type: string
+          example: COMPLETED
+
+    ReverseTransactionRequest:
+      type: object
+      required: [transaction_id, reference, reason]
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        reference:
+          type: string
+          example: REV-TX-20261126-001
+        reason:
+          type: string
+          example: Duplicate payment refund
+
+    ReversalResponse:
+      type: object
+      required: [reversal_transaction_id, original_transaction_id, reference, amount, status]
+      properties:
+        reversal_transaction_id:
+          type: string
+          format: uuid
+        original_transaction_id:
+          type: string
+          format: uuid
+        reference:
+          type: string
+        amount:
+          type: integer
+          format: int64
+        status:
+          type: string
+          example: REVERSED
+
+    FXConvertRequest:
+      type: object
+      required: [from_account_id, to_account_id, source_amount, reference]
+      properties:
+        from_account_id:
+          type: string
+          format: uuid
+        to_account_id:
+          type: string
+          format: uuid
+        source_amount:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Amount in source currency minor units (cents).
+          example: 129000
+        reference:
+          type: string
+          example: FX-KES-USD-001
+        description:
+          type: string
+          example: Treasury KES to USD conversion
+
+    FXConvertResponse:
+      type: object
+      required:
+        - transaction_id
+        - reference
+        - from_account_id
+        - to_account_id
+        - source_currency
+        - target_currency
+        - source_amount
+        - target_amount
+        - exchange_rate
+        - status
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        reference:
+          type: string
+        from_account_id:
+          type: string
+          format: uuid
+        to_account_id:
+          type: string
+          format: uuid
+        source_currency:
+          type: string
+          enum: [KES, USD]
+        target_currency:
+          type: string
+          enum: [KES, USD]
+        source_amount:
+          type: integer
+          format: int64
+          example: 129000
+        target_amount:
+          type: integer
+          format: int64
+          example: 1000
+        exchange_rate:
+          type: string
+          example: "0.00775194"
+        status:
+          type: string
+          example: COMPLETED
+
+    WithdrawRequest:
+      type: object
+      required: [account_id, amount, external_reference, phone_number]
+      properties:
+        account_id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          example: 7500
+        external_reference:
+          type: string
+          example: B2C-PAYOUT-001
+        phone_number:
+          type: string
+          example: "254712345678"
+        description:
+          type: string
+          example: M-Pesa B2C customer payout
+
+    WithdrawResponse:
+      type: object
+      required: [transaction_id, external_reference, phone_number, amount, status]
+      properties:
+        transaction_id:
+          type: string
+          format: uuid
+        external_reference:
+          type: string
+        phone_number:
+          type: string
+        amount:
+          type: integer
+          format: int64
+        status:
+          type: string
+          example: INITIATED
+
+    C2BDepositWebhookRequest:
+      type: object
+      required: [account_id, amount, external_reference, phone_number]
+      properties:
+        account_id:
+          type: string
+          format: uuid
+        amount:
+          type: integer
+          format: int64
+          minimum: 1
+          example: 500000
+        external_reference:
+          type: string
+          example: QKL8921C2B
+        phone_number:
+          type: string
+          example: "254712345678"
+        description:
+          type: string
+          example: M-Pesa C2B Paybill deposit
+
+    DarajaB2CCallbackRequest:
+      type: object
+      required: [Result]
+      properties:
+        Result:
+          type: object
+          required: [OriginatorConversationID, ResultDesc]
+          properties:
+            OriginatorConversationID:
+              type: string
+              example: B2C-PAYOUT-001
+            ConversationID:
+              type: string
+            TransactionID:
+              type: string
+              example: QKL9981XYZ
+            ResultCode:
+              type: integer
+              description: "0 indicates successful payout delivery; non-zero triggers automatic compensating reversal."
+              example: 0
+            ResultDesc:
+              type: string
+              example: The service request is processed successfully.
+
+    B2CSettlementOutcome:
+      type: object
+      required: [external_reference, original_transaction_id, status]
+      properties:
+        external_reference:
+          type: string
+        original_transaction_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [SETTLED, FAILED, TIMED_OUT]
+        reversal_transaction_id:
+          type: string
+          format: uuid
+        reversed_amount:
+          type: integer
+          format: int64
+
+    ChainAuditResponse:
+      type: object
+      required: [verified_at, status, total_entries, genesis_hash, head_hash, head_seq, total_debits, total_credits, trial_balance_net]
+      properties:
+        verified_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [VALID, TAMPERED]
+        total_entries:
+          type: integer
+          format: int64
+        genesis_hash:
+          type: string
+        head_hash:
+          type: string
+        head_seq:
+          type: integer
+          format: int64
+        total_debits:
+          type: integer
+          format: int64
+        total_credits:
+          type: integer
+          format: int64
+        trial_balance_net:
+          type: integer
+          format: int64
+        broken_at_seq:
+          type: integer
+          format: int64
+        failure_reason:
+          type: string
+
+    ReconciliationReport:
+      type: object
+      required: [generated_at, overall_status, currency_trial_balances, institutional_positions, clearing_reconciliation, outbox_summary]
+      properties:
+        generated_at:
+          type: string
+          format: date-time
+        overall_status:
+          type: string
+          enum: [RECONCILED, DISCREPANCY_DETECTED]
+        currency_trial_balances:
+          type: array
+          items:
+            type: object
+            properties:
+              currency:
+                type: string
+              total_debits:
+                type: integer
+                format: int64
+              total_credits:
+                type: integer
+                format: int64
+              net_balance:
+                type: integer
+                format: int64
+              balanced:
+                type: boolean
+        institutional_positions:
+          type: array
+          items:
+            type: object
+            properties:
+              account_id:
+                type: string
+              account_number:
+                type: string
+              currency:
+                type: string
+              account_type:
+                type: string
+              role:
+                type: string
+                enum: [MPESA_CLEARING, FX_BRIDGE, USER_WALLETS_AGGREGATE, SYSTEM_POOL]
+              total_debits:
+                type: integer
+                format: int64
+              total_credits:
+                type: integer
+                format: int64
+              net_balance:
+                type: integer
+                format: int64
+        clearing_reconciliation:
+          type: object
+          properties:
+            settled_deposits_total:
+              type: integer
+              format: int64
+            settled_withdrawals_total:
+              type: integer
+              format: int64
+            pending_withdrawals_total:
+              type: integer
+              format: int64
+            reversed_withdrawals_total:
+              type: integer
+              format: int64
+            expected_clearing_pool_balance:
+              type: integer
+              format: int64
+            actual_clearing_pool_balance:
+              type: integer
+              format: int64
+            clearing_discrepancy:
+              type: integer
+              format: int64
+            reconciled:
+              type: boolean
+        outbox_summary:
+          type: array
+          items:
+            type: object
+            properties:
+              status:
+                type: string
+              count:
+                type: integer
+                format: int64
+
+paths:
+  /api/v1/auth/register:
+    post:
+      tags: [Authentication]
+      summary: Register a new user account
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthRequest"
+      responses:
+        "201":
+          description: User registered and JWT issued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Email already registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/auth/login:
+    post:
+      tags: [Authentication]
+      summary: Authenticate user and obtain JWT
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthRequest"
+      responses:
+        "200":
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/accounts:
+    post:
+      tags: [Accounts & Wallets]
+      summary: Provision a new multi-currency wallet (KES or USD)
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAccountRequest"
+      responses:
+        "201":
+          description: Currency wallet created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletAccount"
+        "400":
+          description: Unsupported currency
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    get:
+      tags: [Accounts & Wallets]
+      summary: List all wallets and derived balances for authenticated user
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: User wallets retrieved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountListResponse"
+
+  /api/v1/accounts/balance:
+    get:
+      tags: [Accounts & Wallets]
+      summary: Get live derived balance for a specific account
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: account_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Current account balance in minor units
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BalanceResponse"
+        "403":
+          description: Account does not belong to authenticated user
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/accounts/statement:
+    get:
+      tags: [Accounts & Wallets]
+      summary: Retrieve chronological journal entries for an account
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: account_id
+          in: query
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Account statement entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/JournalEntry"
+
+  /api/v1/transfers:
+    post:
+      tags: [Ledger & FX]
+      summary: Execute an atomic same-currency double-entry transfer
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransferRequest"
+      responses:
+        "201":
+          description: Transfer committed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransferResponse"
+        "422":
+          description: Insufficient funds or currency mismatch
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/transfers/reverse:
+    post:
+      tags: [Ledger & FX]
+      summary: Post an append-only compensating reversal inverting all transaction legs
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReverseTransactionRequest"
+      responses:
+        "201":
+          description: Compensating reversal committed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReversalResponse"
+        "409":
+          description: Transaction already reversed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "422":
+          description: Insufficient funds on target wallet for reversal clawback
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/fx/convert:
+    post:
+      tags: [Ledger & FX]
+      summary: Convert funds across KES and USD via institutional FX bridge liquidity pools
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FXConvertRequest"
+      responses:
+        "201":
+          description: 4-leg cross-currency FX conversion committed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FXConvertResponse"
+        "422":
+          description: Insufficient source currency balance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/clearing/withdraw:
+    post:
+      tags: [External Clearing & Webhooks]
+      summary: Initiate an external M-Pesa B2C payout
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKeyHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WithdrawRequest"
+      responses:
+        "201":
+          description: B2C withdrawal initiated in PENDING clearing state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WithdrawResponse"
+        "422":
+          description: Insufficient wallet funds
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/webhooks/mpesa/c2b:
+    post:
+      tags: [External Clearing & Webhooks]
+      summary: Settle an HMAC-authenticated M-Pesa C2B deposit into a user wallet
+      security:
+        - WebhookHMACAuth: []
+      parameters:
+        - $ref: "#/components/parameters/WebhookTimestampHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/C2BDepositWebhookRequest"
+      responses:
+        "201":
+          description: C2B deposit settled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransferResponse"
+        "401":
+          description: Missing, expired, or invalid HMAC signature
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/webhooks/mpesa/b2c/result:
+    post:
+      tags: [External Clearing & Webhooks]
+      summary: Process Daraja B2C result callback (settles on ResultCode=0 or auto-reverses on failure)
+      security:
+        - WebhookHMACAuth: []
+      parameters:
+        - $ref: "#/components/parameters/WebhookTimestampHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DarajaB2CCallbackRequest"
+      responses:
+        "200":
+          description: B2C callback processed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/B2CSettlementOutcome"
+        "401":
+          description: Invalid HMAC signature
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /api/v1/webhooks/mpesa/b2c/timeout:
+    post:
+      tags: [External Clearing & Webhooks]
+      summary: Process Daraja B2C queue timeout callback and trigger automatic compensating reversal
+      security:
+        - WebhookHMACAuth: []
+      parameters:
+        - $ref: "#/components/parameters/WebhookTimestampHeader"
+        - $ref: "#/components/parameters/WebhookSignatureHeader"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DarajaB2CCallbackRequest"
+      responses:
+        "200":
+          description: B2C timeout processed and funds refunded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/B2CSettlementOutcome"
+
+  /api/v1/audit/verify-chain:
+    get:
+      tags: [Audit & Observability]
+      summary: Replay and verify the entire SHA-256 journal hash chain from genesis
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Hash chain intact and trial balance net is zero
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChainAuditResponse"
+        "409":
+          description: Hash chain tampering or trial balance discrepancy detected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChainAuditResponse"
+
+  /api/v1/audit/reconcile:
+    get:
+      tags: [Audit & Observability]
+      summary: Generate multi-currency trial balance, FX bridge, and M-Pesa clearing reconciliation report
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: All currency books and clearing pools reconciled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReconciliationReport"
+        "409":
+          description: Reconciliation discrepancy detected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReconciliationReport"
+
+  /metrics:
+    get:
+      tags: [Audit & Observability]
+      summary: Scrape Prometheus metrics for FX volume, clearing outcomes, and reconciliation gauges
+      responses:
+        "200":
+          description: Prometheus text exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
