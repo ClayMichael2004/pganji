@@ -346,6 +346,7 @@ func main() {
 	// -------------------------------------------------------------------------
 	// 9. Cryptographic SHA-256 Hash Chain Verification
 	// -------------------------------------------------------------------------
+	time.Sleep(250 * time.Millisecond)
 	status, raw, err = client.doJSON("GET", "/audit/verify-chain", nil, nil)
 	var chainResp struct {
 		Status          string `json:"status"`
@@ -354,7 +355,7 @@ func main() {
 	}
 	_ = json.Unmarshal(raw, &chainResp)
 	assert(err == nil && status == http.StatusOK && chainResp.Status == "VALID" && chainResp.TrialBalanceNet == 0,
-		fmt.Sprintf("SHA-256 hash chain VALID across %d entries (trial_balance_net=%d)", chainResp.TotalEntries, chainResp.TrialBalanceNet))
+		fmt.Sprintf("SHA-256 hash chain VALID across %d entries (HTTP %d, trial_balance_net=%d, body=%s)", chainResp.TotalEntries, status, chainResp.TrialBalanceNet, string(raw)))
 
 	// -------------------------------------------------------------------------
 	// 10. Multi-Currency Treasury & Clearing Reconciliation
