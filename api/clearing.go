@@ -174,3 +174,120 @@ func (s *Server) HandleWithdraw(w http.ResponseWriter, r *http.Request) {
 		"amount":             req.Amount,
 	})
 }
+type MpesaB2CCallbackRequest struct {
+	ExternalReference string `json:"external_reference"`
+	ProviderReceipt   string `json:"provider_receipt"`
+	ResultCode        int    `json:"result_code"`
+	ResultDesc        string `json:"result_desc"`
+	// Optional Safaricom Daraja nested Result envelope support
+	Result *struct {
+		OriginatorConversationID string `json:"OriginatorConversationID"`
+		ConversationID           string `json:"ConversationID"`
+		TransactionID            string `json:"TransactionID"`
+		ResultCode               int    `json:"ResultCode"`
+		ResultDesc               string `json:"ResultDesc"`
+	} `json:"Result,omitempty"`
+}
+
+func parseB2CCallbackPayload(body []byte, isTimeout bool) (db.B2CCallbackParams, error) {
+	var raw MpesaB2CCallbackRequest
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return db.B2CCallbackParams{}, err
+	}
+
+	params := db.B2CCallbackParams{
+		ExternalReference: strings.TrimSpace(raw.ExternalReference),
+		ProviderReceipt:   strings.TrimSpace(raw.ProviderReceipt),
+		ResultCode:        raw.ResultCode,
+		ResultDesc:        strings.TrimSpace(raw.ResultDesc),
+		IsTimeout:         isTimeout,
+	}
+
+	if raw.Result != nil {
+		if params.ExternalReference == "" {
+			params.ExternalReference = strings.TrimSpace(raw.Result.OriginatorConversationID)
+		}
+		if params.ExternalReference == "" {
+			params.ExternalReference = strings.TrimSpace(raw.Result.ConversationID)
+		}
+		if params.ProviderReceipt == "" {
+			params.ProviderReceipt = strings.TrimSpace(raw.Result.TransactionID)
+		}
+		params.ResultCode = raw.Result.ResultCode
+		if params.ResultDesc == "" {
+			params.ResultDesc = strings.TrimSpace(raw.Result.ResultDesc)
+		}
+	}
+
+	if isTimeout && params.ResultCode == 0 {
+		params.ResultCode = 1037 // Standard Daraja timeout code
+	}
+	if params.ResultDesc == "" {
+		if isTimeout {
+			params.ResultDesc = "B2C queue timeout from provider"
+		} else if params.ResultCode == 0 {
+			params.ResultDesc = "The service request is processed successfully."
+		} else {
+			params.ResultDesc = "B2C payout rejected by provider"
+		}
+	}
+
+	return params, nil
+}
+
+// HandleMpesaB2CResultWebhook processes HMAC-signed B2C payout confirmation or failure callbacks.
+func (s *Server) HandleMpesaB2CResultWebhook(w http.ResponseWriter, r *http.Request) {
+	s.processB2CCallback(w, r, false)
+}
+
+// HandleMpesaB2CTimeoutWebhook processes HMAC-signed B2C queue timeout callbacks and triggers auto-reversal.
+func (s *Server) HandleMpesaB2CTimeoutWebhook(w http.ResponseWriter, r *http.Request) {
+	s.processB2CCallback(w, r, true)
+}
+
+func (s *Server) processB2CCallback(w http.ResponseWriter, r *http.Request, isTimeout bool) {
+	bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		ErrorResponse(w, http.StatusBadRequest, "failed to read callback body")
+		return
+	}
+	defer r.Body.Close()
+
+	secret := os.Getenv("WEBHOOK_SECRET")
+	if secret != "" {
+		ts := r.Header.Get("X-Pganji-Timestamp")
+		sig := r.Header.Get("X-Pganji-Signature")
+		if !outbox.VerifyWebhookSignature(secret, ts, sig, bodyBytes, 5*time.Minute) {
+			ErrorResponse(w, http.StatusUnauthorized, "invalid or expired webhook signature")
+			return
+		}
+	}
+
+	params, err := parseB2CCallbackPayload(bodyBytes, isTimeout)
+	if err != nil {
+		ErrorResponse(w, http.StatusBadRequest, "invalid JSON payload")
+		return
+	}
+	if params.ExternalReference == "" {
+		ErrorResponse(w, http.StatusBadRequest, "external_reference (or OriginatorConversationID) is required")
+		return
+	}
+
+	outcome, err := db.SettleB2CResultTx(r.Context(), s.Pool, params)
+	if err != nil {
+		msg := err.Error()
+		switch {
+		case strings.Contains(msg, "not found"):
+			ErrorResponse(w, http.StatusNotFound, msg)
+		case strings.Contains(msg, "already finalized"):
+			ErrorResponse(w, http.StatusConflict, msg)
+		case strings.Contains(msg, "not a B2C withdrawal"):
+			ErrorResponse(w, http.StatusBadRequest, msg)
+		default:
+			ErrorResponse(w, http.StatusInternalServerError, "failed to process B2C callback")
+		}
+		return
+	}
+
+	JSONResponse(w, http.StatusOK, outcome)
+}
