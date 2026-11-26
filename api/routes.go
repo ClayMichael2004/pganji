@@ -73,8 +73,8 @@ func (s *Server) Routes() http.Handler{
 		// Treasury & Cryptographic Audit Endpoints (ADMIN role required)
 		r.Group(func(r chi.Router) {
 			r.Use(s.RequireAdmin)
-			r.Get("/audit/verify-chain", s.HandleVerifyChain)
-			r.Get("/audit/reconcile", s.HandleReconcile)
+			r.Get("/audit/verify-chain", s.HandleVerifyLedgerChain)
+			r.Get("/audit/reconcile", s.HandleReconciliationReport)
 		})
 	})
 
