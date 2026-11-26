@@ -1,0 +1,83 @@
+groups:
+  - name: pganji_accounting_invariants
+    interval: 15s
+    rules:
+      - alert: PganjiTrialBalanceImbalance
+        expr: pganji_reconciliation_trial_balance_net_minor_units != 0
+        for: 0m
+        labels:
+          severity: critical
+          domain: accounting
+        annotations:
+          summary: "CRITICAL: Trial balance discrepancy detected in {{ $labels.currency }}"
+          description: "Currency book {{ $labels.currency }} has a non-zero net trial balance of {{ $value }} minor units (SUM(DEBIT) != SUM(CREDIT)). Immediate ledger audit required."
+
+      - alert: PganjiClearingPoolDiscrepancy
+        expr: pganji_reconciliation_clearing_discrepancy_minor_units != 0
+        for: 0m
+        labels:
+          severity: critical
+          domain: clearing
+        annotations:
+          summary: "CRITICAL: M-Pesa clearing pool discrepancy detected"
+          description: "CLEARING-MPESA-KES ledger balance differs from external_clearing_records net settled cashflow by {{ $value }} minor units."
+
+      - alert: PganjiHashChainHeightStalledOrRegressed
+        expr: delta(pganji_ledger_hash_chain_height[5m]) < 0
+        for: 0m
+        labels:
+          severity: critical
+          domain: audit
+        annotations:
+          summary: "CRITICAL: Journal hash chain sequence height regressed"
+          description: "pganji_ledger_hash_chain_height decreased by {{ $value }} over the last 5 minutes, indicating potential database restore or tampering."
+
+  - name: pganji_outbox_and_clearing_health
+    interval: 15s
+    rules:
+      - alert: PganjiOutboxEventsFailed
+        expr: pganji_outbox_events_count{status="FAILED"} > 0
+        for: 1m
+        labels:
+          severity: warning
+          domain: outbox
+        annotations:
+          summary: "Transactional outbox has {{ $value }} FAILED event(s)"
+          description: "One or more domain events in outbox_events transitioned to FAILED delivery status. Inspect downstream webhook receiver health."
+
+      - alert: PganjiOutboxBacklogStalled
+        expr: |
+          pganji_outbox_events_count{status="PENDING"} > 0
+          and
+          changes(pganji_outbox_events_count{status="PUBLISHED"}[2m]) == 0
+        for: 2m
+        labels:
+          severity: warning
+          domain: outbox
+        annotations:
+          summary: "Transactional outbox worker stalled with {{ $value }} PENDING event(s)"
+          description: "Pending outbox events exist, but zero events were published over the last 2 minutes. Verify background worker loop and WEBHOOK_URL connectivity."
+
+      - alert: PganjiHighB2CFailureRate
+        expr: |
+          sum(rate(pganji_clearing_operations_total{direction="WITHDRAWAL",status=~"FAILED|TIMED_OUT"}[10m]))
+          /
+          clamp_min(sum(rate(pganji_clearing_operations_total{direction="WITHDRAWAL",status="INITIATED"}[10m])), 0.001)
+          > 0.25
+        for: 5m
+        labels:
+          severity: warning
+          domain: clearing
+        annotations:
+          summary: "Elevated M-Pesa B2C payout failure/timeout rate (>25%)"
+          description: "More than 25% of initiated B2C withdrawals failed or timed out over the last 10 minutes. Compensating auto-reversals are active, check Daraja gateway status."
+
+      - alert: PganjiHighAPILatencyP95
+        expr: histogram_quantile(0.95, sum(rate(pganji_http_request_duration_seconds_bucket[5m])) by (le, method, path)) > 0.25
+        for: 5m
+        labels:
+          severity: warning
+          domain: api
+        annotations:
+          summary: "High p95 latency on {{ $labels.method }} {{ $labels.path }}"
+          description: "95th percentile latency on {{ $labels.method }} {{ $labels.path }} is {{ $value }}s (threshold: 0.25s)."
